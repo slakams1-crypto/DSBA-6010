@@ -1,0 +1,182 @@
+[
+    {
+        "messages": [
+            {"role": "user", "content": "Most common site of myositis ossificans?"},
+            {"role": "assistant", "content": "Quadriceps muscle (around the knee)"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of nephrotic syndrome in children?"},
+            {"role": "assistant", "content": "Minimal change disease"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common organism causing community-acquired pneumonia?"},
+            {"role": "assistant", "content": "Streptococcus pneumoniae"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of hyperthyroidism?"},
+            {"role": "assistant", "content": "Graves disease"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common site of peptic ulcer?"},
+            {"role": "assistant", "content": "First part of the duodenum"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most sensitive investigation for pulmonary embolism?"},
+            {"role": "assistant", "content": "CT pulmonary angiography"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of acute pancreatitis?"},
+            {"role": "assistant", "content": "Gallstones"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common primary bone tumor?"},
+            {"role": "assistant", "content": "Osteosarcoma"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of Cushing syndrome?"},
+            {"role": "assistant", "content": "Exogenous corticosteroid use"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common site of ectopic pregnancy?"},
+            {"role": "assistant", "content": "Ampulla of fallopian tube"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of small bowel obstruction in adults?"},
+            {"role": "assistant", "content": "Postoperative adhesions"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common organism causing urinary tract infection?"},
+            {"role": "assistant", "content": "Escherichia coli"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of upper gastrointestinal bleeding?"},
+            {"role": "assistant", "content": "Peptic ulcer disease"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common type of shock in trauma?"},
+            {"role": "assistant", "content": "Hypovolemic shock"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common congenital heart disease?"},
+            {"role": "assistant", "content": "Ventricular septal defect"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of hypothyroidism worldwide?"},
+            {"role": "assistant", "content": "Iodine deficiency"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common organism causing infective endocarditis in IV drug users?"},
+            {"role": "assistant", "content": "Staphylococcus aureus"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of secondary hypertension?"},
+            {"role": "assistant", "content": "Renal artery stenosis"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common site of osteomyelitis in children?"},
+            {"role": "assistant", "content": "Metaphysis of long bones"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of hemolytic disease of the newborn?"},
+            {"role": "assistant", "content": "Rh incompatibility"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common type of kidney stone?"},
+            {"role": "assistant", "content": "Calcium oxalate stone"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of chronic liver disease worldwide?"},
+            {"role": "assistant", "content": "Chronic hepatitis B"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common nerve injured in midshaft humerus fracture?"},
+            {"role": "assistant", "content": "Radial nerve"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of meningitis in young adults?"},
+            {"role": "assistant", "content": "Neisseria meningitidis"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of macrocytic anemia?"},
+            {"role": "assistant", "content": "Vitamin B12 deficiency"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of pediatric bronchiolitis?"},
+            {"role": "assistant", "content": "Respiratory syncytial virus (RSV)"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common location of extradural hematoma?"},
+            {"role": "assistant", "content": "Temporal region"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common complication of myocardial infarction?"},
+            {"role": "assistant", "content": "Arrhythmia"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of painless hematuria in elderly?"},
+            {"role": "assistant", "content": "Bladder carcinoma"}
+        ]
+    },
+    {
+        "messages": [
+            {"role": "user", "content": "Most common cause of acute bacterial meningitis in neonates?"},
+            {"role": "assistant", "content": "Group B Streptococcus"}
+        ]
+    }
+]
