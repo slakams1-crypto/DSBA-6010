@@ -1,0 +1,43 @@
+# Core dependencies
+gradio>=4.0.0
+huggingface-hub>=0.20.0
+
+# Utilities
+numpy
+pandas
+matplotlib
+plotly
+torch>=2.0.0
+transformers>=4.30.0
+openai>=1.0.0
+pillow>=9.0.0
+requests>=2.28.0
+librosa>=0.10.0
+datasets>=2.0
+faster-whisper
+openai-whisper
+
+# VectorDB and Embeddings
+langchain-community>=0.0.29
+chromadb>=0.4.22
+sentence-transformers>=2.2.2
+
+# LLM and optimization
+triton>=2.1.0
+accelerate>=0.24.0
+bitsandbytes>=0.46.1
+evaluate>=0.4.0
+guardrails-ai>=0.4.0
+
+# Search
+youtube_search
+ddgs
+
+# Langchain Ecosystem
+langchain>=0.1.0
+langchain-openai>=0.0.5
+langchain-text-splitters>=0.0.1
+
+# Monitoring
+prometheus_client
+psutil
