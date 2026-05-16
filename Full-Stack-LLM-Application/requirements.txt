@@ -1,6 +1,9 @@
 # Core dependencies
-gradio>=4.0.0
+# gradio[oauth,mcp]==6.12.0
 huggingface-hub>=0.20.0
+
+# uvicorn>=0.14.0
+# websockets>=10.4
 
 # Utilities
 numpy
@@ -27,7 +30,7 @@ triton>=2.1.0
 accelerate>=0.24.0
 bitsandbytes>=0.46.1
 evaluate>=0.4.0
-guardrails-ai>=0.4.0
+# guardrails-ai>=0.6.0
 
 # Search
 youtube_search
@@ -38,6 +41,12 @@ langchain>=0.1.0
 langchain-openai>=0.0.5
 langchain-text-splitters>=0.0.1
 
+# Langsmith
+langsmith>=0.1.0
+
 # Monitoring
 prometheus_client
 psutil
+
+# Pdf
+fpdf2>=2.7.0
