@@ -5,14 +5,19 @@ import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 import logging
 logging.getLogger("asyncio").setLevel(logging.ERROR)
-import asyncio
-import time
-import sys
-import signal
-from functools import partial
-import os, json
+import asyncio, sys, signal, os, gc
+import threading, base64, uuid, unicodedata, subprocess, psutil
+from io import BytesIO
+import requests
+import time, datetime
+import json
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional, List, Tuple
+import functools
+from functools import partial
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import torch
 from transformers import (
     Blip2Processor, Blip2ForConditionalGeneration,
@@ -21,18 +26,14 @@ from transformers import (
     AutoTokenizer, pipeline
 )
 import openai
-import requests
 from PIL import Image
-import httpx # Added for ToolRetryMiddleware
-from io import BytesIO
-import gc
 import gradio as gr
-from calendar_agent import CalendarAgent
+import httpx # Added for ToolRetryMiddleware
 from huggingface_hub import login
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
+from langchain_core.messages import AIMessage, ToolMessage, HumanMessage, SystemMessage
 from langchain.tools import tool
 from langchain_community.tools import YouTubeSearchTool
 from ddgs import DDGS
@@ -45,45 +46,30 @@ from langchain.agents.middleware import (
 )
 from langgraph.runtime import Runtime
 from langchain_openai import ChatOpenAI
+from langsmith import traceable, Client, get_current_run_tree
 from faster_whisper import WhisperModel
 import whisper
-sys.path.insert(0, './MedIntel')
-from safety.safety import check_moderation, check_moderation_flag, execute_chat_with_input_moderation, execute_all_moderations, check_image_moderation, get_chat_response_guardrails_async, get_chat_response_openai_async
-from metrics import app as metrics_app
-import threading
-#import uvicorn
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-import psutil
-import functools
-import subprocess
-from typing import Optional, List, Dict
-from dotenv import load_dotenv
-load_dotenv()
-from langsmith import traceable
-import base64
+from calendar_agent import CalendarAgent
 import xml.etree.ElementTree as ET
-import datetime
-import uuid
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
-import unicodedata
+from safety.safety import check_moderation, check_moderation_flag, execute_chat_with_input_moderation, execute_all_moderations, check_image_moderation, get_chat_response_guardrails_async, get_chat_response_openai_async
+from metrics import app as metrics_app
+from dotenv import load_dotenv
+load_dotenv()
+sys.path.insert(0, './MedIntel')
 import html
-from langsmith import Client
-#from langsmith.run_helpers import get_current_run_tree  # if this fails, try: from langsmith import get_current_run_tree
-from langsmith import get_current_run_tree
 ls_client = Client()
 
 
 # ============================================
-# LangSmith Tracing Set to False
+# LangSmith Tracing Set to False on StartUp
 # ============================================
 os.environ.setdefault("LANGSMITH_TRACING_V2", "false")
 
 
 # ============================================
-# # CSS for Gradio UI elements
+# CSS for Gradio UI elements
 # ============================================
 custom_css = """
 body { font-size: 18px !important; }
@@ -96,24 +82,29 @@ body { font-size: 18px !important; }
 }
 .block.prompt-box textarea::placeholder,
 .block.prompt-box input::placeholder {
-    color: #111827 !important;   /* near-black */
+    color: #6b7280 !important; 
     font-weight: 600 !important;
     opacity: 1 !important;       /* browsers default to ~0.5 */
 }
 /* Also darken what the user types so it matches */
 .block.prompt-box textarea,
 .block.prompt-box input {
-    color: #111827 !important;
+    color: #374151 !important; 
     font-weight: 500 !important;
-}  
+}
+/* Rate this response */
+.main-col {
+    gap: 8px !important;
+}
 """
+
 
 # Live scalar: how many tool calls are in-flight *right now*
 _current_pending = 0
 
 
 # =============================================
-# # In-memory metrics needed for Metrics Dashboard
+# In-memory metrics needed for Metrics Dashboard
 # =============================================
 metrics = {
     "timestamps": [],  # to track request times
@@ -162,7 +153,8 @@ QAmodel = {
     "blip": "Salesforce/blip2-opt-2.7b",
     "blip6.7": "Salesforce/blip2-opt-6.7b",
     "whisper": "turbo",
-    "embed-model": "sentence-transformers/all-MiniLM-L6-v2"
+    "embed-model": "sentence-transformers/all-MiniLM-L6-v2",
+    "omni-latest": "omni-moderation-latest"
 }
 
 
@@ -181,14 +173,14 @@ else:
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-NCBI_API_KEY = os.getenv("NCBI_API_KEY")  # optional, increases rate limit to 10/sec
+NCBI_API_KEY = os.getenv("NCBI_API_KEY")  # PubMed Search, Optional, increases rate limit to 10/sec
 print("Successfully loaded environment variables")
 
 
 # ============================================
 # System prompt
 # ============================================
-system_prompt = (
+SYSTEM_PROMPT = (
     "You are a helpful Medical Q&A assistant. "
     "For EVERY medical question, you MUST first use the 'retrieve_context' tool. "
     "After receiving the retrieved context, if the question asks for advice, treatment, "
@@ -232,16 +224,19 @@ CLASSIFIER_PROMPT = (
 
 
 # ============================================
-# Classifiers
+# Inference Model
 # ============================================
-classifier_model = ChatOpenAI(
+inference_model = ChatOpenAI(
     model=QAmodel['gpt-mini'], 
     api_key=OPENAI_API_KEY, 
-    temperature=0
+    temperature=0    
 )
 
 
-classifier_topic_model = ChatOpenAI(
+# ============================================
+# Classifier Model
+# ============================================
+classifier_model = ChatOpenAI(
     model=QAmodel['gpt-nano'], 
     api_key=OPENAI_API_KEY, 
     temperature=0
@@ -252,7 +247,7 @@ classifier_topic_model = ChatOpenAI(
 # Vision Model for Analyzing Images/Scans
 # ============================================
 vision_model = ChatOpenAI(
-    model="gpt-4o-mini",    # or "gpt-4o" for higher detail
+    model=QAmodel['gpt-mini'],  # or "gpt-4o" for higher detail
     api_key=OPENAI_API_KEY,
     temperature=0.3,
     max_tokens=1500,
@@ -264,6 +259,10 @@ global _kb_had_results
 _kb_had_results = False
 global is_medical_query
 is_medical_query = False # Initialize globally
+
+# Global variables
+_device = "cuda" if torch.cuda.is_available() else "cpu"
+_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
 
 # =================================================================
@@ -313,11 +312,6 @@ whisper_model = whisper.load_model(QAmodel["whisper"])
 print("✓ OpenAI Whisper model loaded")
 
 
-# Global variables
-_device = "cuda" if torch.cuda.is_available() else "cpu"
-_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
-
 # ============================================
 # Helper Function to return GPU Utilization for Dashboard
 # ============================================
@@ -349,7 +343,7 @@ def get_gpu_utilization():
 # Display Metrics Dashboard
 # ============================================
 def show_dashboard():
-    # --- Pad missing lists if needed ---
+    # Pad missing lists if needed
     n = len(metrics["timestamps"])
     for key in ["latencies", "tool_calls", "errors", "requests", "pending"]:
         while len(metrics[key]) < n:
@@ -588,6 +582,348 @@ def show_dashboard():
         )
     
     return summary_html, latency_fig, count_fig, tool_calls_fig, errors_fig, heatmap_fig
+    
+
+# =======================================
+# Image Encoder Helper
+# =======================================
+def _encode_image_to_base64(image_path: str) -> tuple[str, str]:
+    with open(image_path, "rb") as image_file:
+        encoded = base64.b64encode(image_file.read()).decode('utf-8')
+    ext = os.path.splitext(image_path)[1].lower()
+    mime_types = {
+        '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+        '.png': 'image/png', '.gif': 'image/gif',
+        '.webp': 'image/webp', '.bmp': 'image/bmp',
+    }
+    return encoded, mime_types.get(ext, 'image/jpeg')
+
+# =======================================
+# Image Moderation Flag
+# ====================================
+async def check_image_moderation_flag(image_path: str) -> Tuple[bool, str]:
+    """
+    Returns (is_flagged, base64_image, mime_type).
+    base64_image and mime_type are reused for the vision call so we don't encode twice.
+    """
+    if not image_path or not os.path.isfile(image_path):
+        # Fail-safe: treat missing file as flagged
+        return True, "", ""
+    
+    try:
+        # Reuse existing helper (returns correct MIME type)
+        base64_image, mime_type = _encode_image_to_base64(image_path)
+        
+        response = await client.moderations.create(
+            model=QAmodel['omni-latest'],
+            input=[
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{base64_image}"
+                    }
+                }
+            ]
+        )
+        
+        is_flagged = response.results[0].flagged
+        return is_flagged, base64_image, mime_type
+        
+    except Exception as e:
+        print(f"⚠️ Moderation API error: {e}")
+        # Fail-safe: if we can't verify, block the image
+        return True, "", ""
+
+# =======================================
+# Function to format youtube sentence in response
+# =======================================
+def _format_youtube_sentence(yt_links: str) -> str:
+    """Parse markdown links from youtube_links_tool output into a natural sentence."""
+    matches = re.findall(r'\[(.*?)\]\((.*?)\)', yt_links)
+    if not matches:
+        return ""
+
+    formatted = [f"[{title}]({url})" for title, url in matches]
+
+    if len(formatted) == 1:
+        return f" For more information, check out this video: {formatted[0]}."
+    elif len(formatted) == 2:
+        return f" For more information, check out these videos: {formatted[0]} and {formatted[1]}."
+    else:
+        return f" For more information, check out these videos: {', '.join(formatted[:-1])}, and {formatted[-1]}."
+
+# =======================================
+# Function to extract answer from any retrieval format.
+# =======================================
+def _extract_kb_answer(raw: str) -> str | None:
+    """Extract answer from any retrieval format."""
+    if not raw or "no relevant" in raw.lower():
+        return None
+    
+    # Try "answer:" prefix
+    for line in raw.splitlines():
+        if line.strip().lower().startswith("answer:"):
+            ans = line.strip().split(":", 1)[1].strip()
+            # Strip letter prefix like "D. "
+            if len(ans) > 2 and ans[1] == "." and ans[0].isalpha():
+                ans = ans[2:].strip()
+            return ans if ans else None
+    
+    # Try "Source 1:" content
+    if "Source 1:" in raw:
+        parts = raw.split("Source 1:", 1)
+        if len(parts) > 1:
+            content = parts[1].strip().lstrip('.').strip()
+            return content if content else None
+    
+    # Raw content fallback
+    stripped = raw.strip()
+    return stripped if stripped else None
+
+# =======================================
+# Function to decide if personal advice/treatment questions or not.
+# =======================================
+def _is_advice_question(text: str) -> bool:
+    t = text.lower().strip()
+    
+    # Branch 1: Requires personal pronoun ("I", "my", "me")
+    has_personal = any(p in t for p in ["i ", "i'm", "i am", "my ", "me "])
+    
+    personal_action = any(p in t for p in [
+        # A. Symptom / experience
+        "i'm experiencing", "i am experiencing", "i'm having", "i am having",
+        "i have", "i've been diagnosed", "i was diagnosed", "i've got",
+        "i feel", "i'm feeling", "i suffer from", "i'm suffering from",
+        # B. Action seeking
+        "how do i", "how can i", "how should i",
+        "what do i do", "what can i take", "what can i use",
+        "what is the best way to",
+        # C. Goal / outcome
+        "lower my", "reduce my", "control my", "manage my",
+        "get rid of", "relieve my", "alleviate my", "cure my",
+    ])
+    
+    if has_personal and personal_action:
+        return True
+    
+    # Branch 2: Standalone (no personal pronoun needed)
+    standalone = any(p in t for p in [
+        # D. Treatment / medication
+        "treatment for", "medicine for", "medication for", "drug for",
+        "how to treat", "how to manage",
+        "what is the treatment for", "what is the best treatment",
+        # E. How / what to advice
+        "what should",
+        "what to do", "what to do if", "what to do when",
+        "what to do with", "what to do for", "what to do about",
+        "how to", "how do you",
+        "how to lower", "how to reduce", "how to control", "how to prevent",
+        "how to get rid of", "how to handle",
+        # F. Recommendations
+        "best way to", "ways to", "tips for",
+        "what do you recommend", "help me with", "recommendations for",
+    ])
+    
+    return standalone
+
+# ===========================================
+# Misc. Function to extract plain text from Gradio's wrapped format
+# ===========================================
+def clean_text(value):
+    """Extract plain text from Gradio's wrapped format.
+    Handles: 
+    - String values
+    - Lists containing dicts with 'text' key: [{'text': '...', 'type': 'text'}]
+    - Direct dicts with 'text' or 'content' keys
+    """
+    
+    if value is None:
+        return ""
+    
+    # Handle list of dicts (Gradio's new format)
+    if isinstance(value, list) and len(value) > 0:
+        if isinstance(value[0], dict):
+            # Extract text from each dict and join
+            texts = [item.get('text', '') for item in value if isinstance(item, dict)]
+            return ' '.join(filter(None, texts))
+        # If list of strings
+        return ' '.join(str(item) for item in value if item is not None)
+    
+    # Handle direct dict
+    elif isinstance(value, dict):
+        return value.get('text', value.get('content', str(value)))
+    
+    # Already a string
+    return str(value)  
+
+# ===========================================
+# Misc. Function to deep clean chat history
+# ===========================================
+def clean_chat_history(history):
+    """Ensure all messages are plain dicts with string content."""
+    
+    clean = []
+    for msg in history:
+        if isinstance(msg, dict):
+            # Clean the content field
+            raw_content = msg.get("content", "")
+            cleaned_content = clean_text(raw_content)
+            
+            clean.append({
+                "role": str(msg.get("role", "user")),
+                "content": cleaned_content
+            })
+    return clean
+
+# ===========================================
+# Misc. Function to extract plain text from Gradio's Textbox format
+# ===========================================
+def extract_gradio_text(value):
+    """Extract plain text from Gradio's Textbox format."""
+    
+    if isinstance(value, list) and len(value) > 0:
+        if isinstance(value[0], dict) and 'text' in value[0]:
+            return value[0]['text']
+    return str(value) if value else ""    
+
+# ===========================================
+# Function to extract kb answer
+# ===========================================
+def _extract_kb_answer(raw: str) -> str | None:
+    """Extract answer from retrieval. Reject question stems without clear answers."""
+    if not raw or "no relevant" in raw.lower():
+        return None
+    
+    # Try "answer:" line first
+    for line in raw.splitlines():
+        if line.strip().lower().startswith("answer:"):
+            ans = line.strip().split(":", 1)[1].strip()
+            if len(ans) > 2 and ans[1] == "." and ans[0].isalpha():
+                ans = ans[2:].strip()
+            return ans if ans else None
+    
+    # Try "Source 1:" content
+    if "Source 1:" in raw:
+        parts = raw.split("Source 1:", 1)
+        if len(parts) > 1:
+            content = parts[1].strip().lstrip('.').strip()
+            
+            # CRITICAL: If content starts with "query:", it's a question stem (USMLE-style).
+            # Don't return the vignette text as the answer.
+            if content.lower().startswith("query:"):
+                # Look for an "answer:" line buried inside the content
+                for line in content.splitlines():
+                    if line.strip().lower().startswith("answer:"):
+                        ans = line.strip().split(":", 1)[1].strip()
+                        if len(ans) > 2 and ans[1] == "." and ans[0].isalpha():
+                            ans = ans[2:].strip()
+                        return ans if ans else None
+                # No answer found inside question stem → insufficient for direct return
+                return None
+            
+            return content if content else None
+    
+    # Raw content fallback
+    stripped = raw.strip()
+    return stripped if stripped else None
+
+# ===========================================
+# Function to extract weight (kg) and height in meters from natural language.
+# ===========================================
+def _extract_bmi_params(text: str) -> tuple[float | None, float | None, float | None, float | None]:
+    """
+    Extract weight (kg), height (m), and optionally the original imperial values.
+    Returns: (weight_kg, height_m, weight_lb, height_ft)
+    """
+    t = text.lower()
+    weight_kg = None
+    weight_lb = None
+    height_m = None
+    height_ft = None
+
+    # Weight: metric
+    w_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kgs?)\b', t)
+    if w_match:
+        weight_kg = float(w_match.group(1))
+    else:
+        # Weight: imperial (lbs / pounds) → kg
+        w_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:lbs?|pounds?)\b', t)
+        if w_match:
+            weight_lb = float(w_match.group(1))
+            weight_kg = weight_lb * 0.45359237
+
+    # Height: metric (meters)
+    h_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:m|meters?)\b', t)
+    if h_match:
+        height_m = float(h_match.group(1))
+    else:
+        # Height: metric (cm) → m
+        cm_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:cm|centimeters?)\b', t)
+        if cm_match:
+            height_m = float(cm_match.group(1)) / 100
+        else:
+            # Height: imperial (feet + inches) → m
+            # Handles: 5'10", 5'10, 5ft10in, 5 feet 10 inches, 5 foot 2, 6'
+            ft_in_match = re.search(
+                r'(\d+(?:\.\d+)?)\s*(?:ft|foot|feet|\')\s*(?:(\d+(?:\.\d+)?)\s*(?:inch(?:es)?|")?)?',
+                t
+            )
+            if ft_in_match:
+                feet = float(ft_in_match.group(1))
+                inches = float(ft_in_match.group(2)) if ft_in_match.group(2) else 0.0
+                height_m = (feet * 12 + inches) * 0.0254
+                height_ft = feet + (inches / 12)
+            else:
+                # Height: imperial (just inches) → m
+                in_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:inch(?:es)?|")', t)
+                if in_match:
+                    inches = float(in_match.group(1))
+                    height_m = inches * 0.0254
+                    height_ft = inches / 12
+
+    return weight_kg, height_m, weight_lb, height_ft
+
+# ===========================================
+# Function to detect questions asking for definitions, explanations, or clarifications.
+# ===========================================
+def _is_definition_question(text: str) -> bool:
+    """Detect questions asking for definitions, explanations, or clarifications."""
+    t = text.lower().strip()
+    definition_patterns = [
+        "what is ", "what are ", "what was ", "what were ",
+        "define ", "definition of ", "definition ",
+        "meaning of ", "meaning ",
+        "clarify ", "clarify what ",
+        "explain ", "explain what ", "please explain",
+        "describe ", "description of ",
+        "what does ", "what do ", "mean by", "what do you mean",
+        "how does ", "how do ",
+    ]
+    return any(p in t for p in definition_patterns)
+
+# ===========================================
+# Function to check if KB answer is just a multiple choice option or bare keyword without explanation.
+# ===========================================
+def _is_poor_kb_answer(answer: str) -> bool:
+    """Check if KB answer is just a multiple choice option or bare keyword without explanation."""
+    if not answer:
+        return True
+    
+    ans = answer.strip()
+    
+    # Multiple choice pattern: "C. Cricopharynx", "A. Tyrosine", "D. Hurler disease"
+    if re.match(r'^[A-E]\.\s*\w+', ans):
+        return True
+    
+    # Too short to be explanatory (< 15 chars or < 3 words)
+    if len(ans) < 15 or len(ans.split()) < 3:
+        return True
+    
+    # Just a noun phrase without a complete sentence (no period, < 6 words)
+    if '.' not in ans and '!' not in ans and '?' not in ans and len(ans.split()) < 6:
+        return True
+    
+    return False
 
 
 # =======================================
@@ -700,24 +1036,35 @@ def retrieve_context(query: str) -> str:
 @track_tool_calls
 def youtube_links_tool(query: str) -> str:
     """Search for video tutorials."""
-    try:
-        # Use DDG for video search (more reliable in Spaces)
-        ddgs = DDGS()
-        
-        # Search specifically for YouTube videos
-        video_query = f"{query} site:youtube.com"
-        results = ddgs.text(video_query, max_results=3)
-        
-        links = []
-        for r in results:
-            if 'youtube.com/watch' in r['href']:
-                links.append(f"[{r['title'][:50]}...]({r['href']})")
-        
-        return "\n".join(links) if links else "No videos found"
-        
-    except Exception as e:
-        # Fallback: return search suggestions
-        return f"Video search temporarily unavailable. Try searching: https://youtube.com/results?search_query={query.replace(' ', '+')}"
+    
+    video_query = f"{query} site:youtube.com"
+    
+    for attempt in range(3):
+        try:
+            ddgs = DDGS()
+            results = ddgs.text(video_query, max_results=4)
+            
+            links = []
+            for r in results:
+                if 'youtube.com/watch' in r['href']:
+                    links.append(f"[{r['title'][:50]}...]({r['href']})")
+            
+            result = "\n".join(links) if links else "No videos found"
+            
+            if result != "No videos found":
+                return result
+            
+            # No videos found — retry if not the last attempt
+            if attempt < 2:
+                time.sleep(0.5)
+                
+        except Exception as e:
+            return (
+                f"Video search temporarily unavailable. "
+                f"Try searching: https://youtube.com/results?search_query={query.replace(' ', '+')}"
+            )
+    
+    return "No videos found" 
         
 @tool
 @track_tool_calls
@@ -727,7 +1074,7 @@ def pubmed_tool(query: str) -> str:
     return summary
     
 # =======================================
-# Available Tools
+# Available Q&A Tools for LangChain Agent
 # =======================================
 tools = [retrieve_context, youtube_links_tool, calculate_bmi]
 
@@ -758,7 +1105,7 @@ def medical_classifier(state: AgentState, runtime: Runtime) -> Dict[str, Any] | 
             temperature=0.0
         )
         is_medical = "YES" in class_result.content.upper()
-        print(f"[Medical Classifier] User Query: '{user_query}' -> Classifier Result: '{class_result.content}'")
+        print(f"[Medical_Classifier] User Query: '{user_query}' -> Classifier Result: '{class_result.content}'")
     except Exception as e:
         print(f"Error in medical_classifier: {e}")
         is_medical = False
@@ -775,115 +1122,9 @@ def medical_classifier(state: AgentState, runtime: Runtime) -> Dict[str, Any] | 
         return None
 
 # =======================================
-# Image Encoder Helper
+# Medical Disclaimer
 # =======================================
-def _encode_image_to_base64(image_path: str) -> tuple[str, str]:
-    with open(image_path, "rb") as image_file:
-        encoded = base64.b64encode(image_file.read()).decode('utf-8')
-    ext = os.path.splitext(image_path)[1].lower()
-    mime_types = {
-        '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-        '.png': 'image/png', '.gif': 'image/gif',
-        '.webp': 'image/webp', '.bmp': 'image/bmp',
-    }
-    return encoded, mime_types.get(ext, 'image/jpeg')        
-
-# =======================================
-# Function to format youtube sentence in response
-# =======================================
-def _format_youtube_sentence(yt_links: str) -> str:
-    """Parse markdown links from youtube_links_tool output into a natural sentence."""
-    matches = re.findall(r'\[(.*?)\]\((.*?)\)', yt_links)
-    if not matches:
-        return ""
-
-    formatted = [f"[{title}]({url})" for title, url in matches]
-
-    if len(formatted) == 1:
-        return f" For more information, check out this video: {formatted[0]}."
-    elif len(formatted) == 2:
-        return f" For more information, check out these videos: {formatted[0]} and {formatted[1]}."
-    else:
-        return f" For more information, check out these videos: {', '.join(formatted[:-1])}, and {formatted[-1]}."
-
-# =======================================
-# Function to extract answer from any retrieval format.
-# =======================================
-def _extract_kb_answer(raw: str) -> str | None:
-    """Extract answer from any retrieval format."""
-    if not raw or "no relevant" in raw.lower():
-        return None
-    
-    # Try "answer:" prefix
-    for line in raw.splitlines():
-        if line.strip().lower().startswith("answer:"):
-            ans = line.strip().split(":", 1)[1].strip()
-            # Strip letter prefix like "D. "
-            if len(ans) > 2 and ans[1] == "." and ans[0].isalpha():
-                ans = ans[2:].strip()
-            return ans if ans else None
-    
-    # Try "Source 1:" content
-    if "Source 1:" in raw:
-        parts = raw.split("Source 1:", 1)
-        if len(parts) > 1:
-            content = parts[1].strip().lstrip('.').strip()
-            return content if content else None
-    
-    # Raw content fallback
-    stripped = raw.strip()
-    return stripped if stripped else None
-
-# =======================================
-# Function to decide if personal advice/treatment questions or not.
-# =======================================
-def _is_advice_question(text: str) -> bool:
-    t = text.lower().strip()
-    
-    # Branch 1: Requires personal pronoun ("I", "my", "me")
-    has_personal = any(p in t for p in ["i ", "i'm", "i am", "my ", "me "])
-    
-    personal_action = any(p in t for p in [
-        # A. Symptom / experience
-        "i'm experiencing", "i am experiencing", "i'm having", "i am having",
-        "i have", "i've been diagnosed", "i was diagnosed", "i've got",
-        "i feel", "i'm feeling", "i suffer from", "i'm suffering from",
-        # B. Action seeking
-        "how do i", "how can i", "how should i",
-        "what do i do", "what can i take", "what can i use",
-        "what is the best way to",
-        # C. Goal / outcome
-        "lower my", "reduce my", "control my", "manage my",
-        "get rid of", "relieve my", "alleviate my", "cure my",
-    ])
-    
-    if has_personal and personal_action:
-        return True
-    
-    # Branch 2: Standalone (no personal pronoun needed)
-    standalone = any(p in t for p in [
-        # D. Treatment / medication
-        "treatment for", "medicine for", "medication for", "drug for",
-        "how to treat", "how to manage",
-        "what is the treatment for", "what is the best treatment",
-        # E. How / what to advice
-        "what should",
-        "what to do", "what to do if", "what to do when",
-        "what to do with", "what to do for", "what to do about",
-        "how to", "how do you",
-        "how to lower", "how to reduce", "how to control", "how to prevent",
-        "how to get rid of", "how to handle",
-        # F. Recommendations
-        "best way to", "ways to", "tips for",
-        "what do you recommend", "help me with", "recommendations for",
-    ])
-    
-    return standalone   
-
-# =======================================
-# Disclaimer
-# =======================================
-class DisclaimerMiddleware(AgentMiddleware):
+class disclaimermiddleware(AgentMiddleware):
     def after_model(self, state: AgentState, runtime: Runtime) -> Dict[str, Any] | None:
         global is_medical_query, _kb_had_results
 
@@ -941,9 +1182,11 @@ class DisclaimerMiddleware(AgentMiddleware):
 
         return state
 
-
+# =======================================
+# Synthesizer for LLM response
+# =======================================
 synthesizer = SummarizationMiddleware(
-    model=classifier_model,
+    model=inference_model,
     trigger=("tokens", 4000),
     max_tokens=1000,
     system_prompt="Synthesize key points, action items, and recent context.",
@@ -958,226 +1201,21 @@ toolretry = ToolRetryMiddleware(max_retries=3,backoff_factor=2.0,retry_on=[Timeo
 # LangChain - Global Agent Setup
 # =======================================
 agent = create_agent(
-    classifier_model,
+    inference_model,
     tools=tools,
-    system_prompt=system_prompt,
+    system_prompt=SYSTEM_PROMPT,
     middleware=[
         medical_classifier,
-        #TodoListMiddleware(),
         synthesizer,
-        #toolselector,
         toolretry,
-        DisclaimerMiddleware()
+        disclaimermiddleware()
     ],
 )
 
 
 # ===========================================
-# Misc. Function to extract plain text from Gradio's wrapped format
+# PubMed Helper Functions
 # ===========================================
-def clean_text(value):
-    """Extract plain text from Gradio's wrapped format.
-    Handles: 
-    - String values
-    - Lists containing dicts with 'text' key: [{'text': '...', 'type': 'text'}]
-    - Direct dicts with 'text' or 'content' keys
-    """
-    
-    if value is None:
-        return ""
-    
-    # Handle list of dicts (Gradio's new format)
-    if isinstance(value, list) and len(value) > 0:
-        if isinstance(value[0], dict):
-            # Extract text from each dict and join
-            texts = [item.get('text', '') for item in value if isinstance(item, dict)]
-            return ' '.join(filter(None, texts))
-        # If list of strings
-        return ' '.join(str(item) for item in value if item is not None)
-    
-    # Handle direct dict
-    elif isinstance(value, dict):
-        return value.get('text', value.get('content', str(value)))
-    
-    # Already a string
-    return str(value)  
-
-
-# ===========================================
-# Misc. Function to deep clean chat history
-# ===========================================
-def clean_chat_history(history):
-    """Ensure all messages are plain dicts with string content."""
-    
-    clean = []
-    for msg in history:
-        if isinstance(msg, dict):
-            # Clean the content field
-            raw_content = msg.get("content", "")
-            cleaned_content = clean_text(raw_content)
-            
-            clean.append({
-                "role": str(msg.get("role", "user")),
-                "content": cleaned_content
-            })
-    return clean
-
-
-# ===========================================
-# Misc. Function to extract plain text from Gradio's Textbox format
-# ===========================================
-def extract_gradio_text(value):
-    """Extract plain text from Gradio's Textbox format."""
-    
-    if isinstance(value, list) and len(value) > 0:
-        if isinstance(value[0], dict) and 'text' in value[0]:
-            return value[0]['text']
-    return str(value) if value else ""    
-
-
-# ===========================================
-# Function to extract kb answer
-# ===========================================
-def _extract_kb_answer(raw: str) -> str | None:
-    """Extract answer from retrieval. Reject question stems without clear answers."""
-    if not raw or "no relevant" in raw.lower():
-        return None
-    
-    # Try "answer:" line first
-    for line in raw.splitlines():
-        if line.strip().lower().startswith("answer:"):
-            ans = line.strip().split(":", 1)[1].strip()
-            if len(ans) > 2 and ans[1] == "." and ans[0].isalpha():
-                ans = ans[2:].strip()
-            return ans if ans else None
-    
-    # Try "Source 1:" content
-    if "Source 1:" in raw:
-        parts = raw.split("Source 1:", 1)
-        if len(parts) > 1:
-            content = parts[1].strip().lstrip('.').strip()
-            
-            # CRITICAL: If content starts with "query:", it's a question stem (USMLE-style).
-            # Don't return the vignette text as the answer.
-            if content.lower().startswith("query:"):
-                # Look for an "answer:" line buried inside the content
-                for line in content.splitlines():
-                    if line.strip().lower().startswith("answer:"):
-                        ans = line.strip().split(":", 1)[1].strip()
-                        if len(ans) > 2 and ans[1] == "." and ans[0].isalpha():
-                            ans = ans[2:].strip()
-                        return ans if ans else None
-                # No answer found inside question stem → insufficient for direct return
-                return None
-            
-            return content if content else None
-    
-    # Raw content fallback
-    stripped = raw.strip()
-    return stripped if stripped else None
-
-
-# ===========================================
-# Function to extract weight (kg) and height in meters from natural language.
-# ===========================================
-def _extract_bmi_params(text: str) -> tuple[float | None, float | None, float | None, float | None]:
-    """
-    Extract weight (kg), height (m), and optionally the original imperial values.
-    Returns: (weight_kg, height_m, weight_lb, height_ft)
-    """
-    t = text.lower()
-    weight_kg = None
-    weight_lb = None
-    height_m = None
-    height_ft = None
-
-    # Weight: metric
-    w_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:kg|kilos?|kgs?)\b', t)
-    if w_match:
-        weight_kg = float(w_match.group(1))
-    else:
-        # Weight: imperial (lbs / pounds) → kg
-        w_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:lbs?|pounds?)\b', t)
-        if w_match:
-            weight_lb = float(w_match.group(1))
-            weight_kg = weight_lb * 0.45359237
-
-    # Height: metric (meters)
-    h_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:m|meters?)\b', t)
-    if h_match:
-        height_m = float(h_match.group(1))
-    else:
-        # Height: metric (cm) → m
-        cm_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:cm|centimeters?)\b', t)
-        if cm_match:
-            height_m = float(cm_match.group(1)) / 100
-        else:
-            # Height: imperial (feet + inches) → m
-            # Handles: 5'10", 5'10, 5ft10in, 5 feet 10 inches, 5 foot 2, 6'
-            ft_in_match = re.search(
-                r'(\d+(?:\.\d+)?)\s*(?:ft|foot|feet|\')\s*(?:(\d+(?:\.\d+)?)\s*(?:inch(?:es)?|")?)?',
-                t
-            )
-            if ft_in_match:
-                feet = float(ft_in_match.group(1))
-                inches = float(ft_in_match.group(2)) if ft_in_match.group(2) else 0.0
-                height_m = (feet * 12 + inches) * 0.0254
-                height_ft = feet + (inches / 12)
-            else:
-                # Height: imperial (just inches) → m
-                in_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:inch(?:es)?|")', t)
-                if in_match:
-                    inches = float(in_match.group(1))
-                    height_m = inches * 0.0254
-                    height_ft = inches / 12
-
-    return weight_kg, height_m, weight_lb, height_ft
-
-
-# ===========================================
-# Function to detect questions asking for definitions, explanations, or clarifications.
-# ===========================================
-def _is_definition_question(text: str) -> bool:
-    """Detect questions asking for definitions, explanations, or clarifications."""
-    t = text.lower().strip()
-    definition_patterns = [
-        "what is ", "what are ", "what was ", "what were ",
-        "define ", "definition of ", "definition ",
-        "meaning of ", "meaning ",
-        "clarify ", "clarify what ",
-        "explain ", "explain what ", "please explain",
-        "describe ", "description of ",
-        "what does ", "what do ", "mean by", "what do you mean",
-        "how does ", "how do ",
-    ]
-    return any(p in t for p in definition_patterns)
-
-
-# ===========================================
-# Function to check if KB answer is just a multiple choice option or bare keyword without explanation.
-# ===========================================
-def _is_poor_kb_answer(answer: str) -> bool:
-    """Check if KB answer is just a multiple choice option or bare keyword without explanation."""
-    if not answer:
-        return True
-    
-    ans = answer.strip()
-    
-    # Multiple choice pattern: "C. Cricopharynx", "A. Tyrosine", "D. Hurler disease"
-    if re.match(r'^[A-E]\.\s*\w+', ans):
-        return True
-    
-    # Too short to be explanatory (< 15 chars or < 3 words)
-    if len(ans) < 15 or len(ans.split()) < 3:
-        return True
-    
-    # Just a noun phrase without a complete sentence (no period, < 6 words)
-    if '.' not in ans and '!' not in ans and '?' not in ans and len(ans.split()) < 6:
-        return True
-    
-    return False
-
-
 def _strip_markdown(text: str) -> str:
     """Lightweight markdown-to-plain-text for PDF rendering (ASCII-safe)."""
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)          # bold
@@ -1300,7 +1338,7 @@ def generate_pubmed_pdf(query: str, summary_md: str, articles: List[Dict]) -> st
 
 
 # ===========================================
-# Generate PubMed HTML Report
+# PubMed HTML Report Generator Function
 # ===========================================
 def generate_pubmed_html(query: str, summary_md: str, articles: List[Dict]) -> str:
     """Generate a styled, self-contained HTML report with scoped CSS."""
@@ -1372,7 +1410,7 @@ def generate_pubmed_html(query: str, summary_md: str, articles: List[Dict]) -> s
 
     
 # ===========================================
-# GENERATE-CHAT FUNCTION (Invokes the LangChain agent)
+# GENERATE-CHAT FUNCTION for Q&A (Invokes the LangChain agent)
 # ===========================================
 def generate_chat(user_input, chat_history):
     """Generate response via agent. Retrieval is forced before agent invocation."""
@@ -1445,7 +1483,7 @@ def generate_chat(user_input, chat_history):
     if is_medical:
         print(f"[Classification] Definition question detected, bypassing classifier: '{user_input}'")
     else:
-        try:
+        try:          
             class_prompt = CLASSIFIER_PROMPT.replace("{user_query}", user_input)
             class_result = classifier_model.invoke(
                 [{"role": "user", "content": class_prompt}],
@@ -1466,7 +1504,7 @@ def generate_chat(user_input, chat_history):
     try:
         # 3. FORCE retrieval before agent invocation
         kb_raw = retrieve_context.invoke({"query": user_input})
-        print(f"[KB] Retrieved: '{kb_raw[:200]}...'")
+        #print(f"[KB] Retrieved: '{kb_raw[:200]}...'")
 
         # 4. Parse retrieved content
         kb_answer = None
@@ -1510,7 +1548,7 @@ def generate_chat(user_input, chat_history):
             print(f"[KB Direct] Factual answer: '{final_ai_message[:200]}...'")
         else:
             # Advice OR poor definition → agent synthesis with context pre-loaded
-            agent_messages = [{"role": "system", "content": system_prompt}]
+            agent_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             for msg in chat_history:
                 if isinstance(msg, dict):
                     agent_messages.append(msg)
@@ -1527,7 +1565,6 @@ def generate_chat(user_input, chat_history):
                 })
             
             agent_messages.append({"role": "user", "content": user_input})
-            
             response = agent.invoke({"messages": agent_messages})
             
             final_ai_message = "I cannot find the best answer. Please consult with a Doctor."
@@ -1563,22 +1600,6 @@ def generate_chat(user_input, chat_history):
         updated.append({"role": "user", "content": user_input})
         updated.append({"role": "assistant", "content": error_msg})
         return clean_chat_history(updated)
-
-
-# ===========================================
-# Helper to keep history code 
-# ===========================================
-def _append_turn(history, user_text, assistant_text):
-    out = []
-    for msg in history:
-        if isinstance(msg, dict):
-            out.append({
-                "role": msg.get("role", "user"),
-                "content": str(msg.get("content", ""))
-            })
-    out.append({"role": "user", "content": user_text})
-    out.append({"role": "assistant", "content": assistant_text})
-    return out
         
 
 # ===========================================
@@ -1626,7 +1647,7 @@ def speech_to_text(audio_input, chat_history):
     """Convert speech to text using Whisper"""
     
     if audio_input is None:
-        return chat_history, "⚠️ No audio recorded"    
+        return "⚠️ No audio recorded", chat_history   
     
     try:
         result = whisper_model.transcribe(audio_input)
@@ -1668,7 +1689,7 @@ def speech_to_text(audio_input, chat_history):
                     {"role": msg.get("role", "user"),"content": str(content)}
                 )
         
-        # Call the main chat generation function with the cleaned history
+        # Call the main chat generation function with the transcribed text
         new_chat_history = generate_chat(transcribed_text, clean_history)
 
         # Return an empty string for the text input and the updated chat history
@@ -1807,7 +1828,10 @@ def summarize_pubmed_query(query: str, max_results: int = 5) -> tuple[str, List[
 
     context = "\n\n".join(paper_blocks)
 
-    synthesis_prompt = (
+    # ============================================
+    # PubMed synthesis prompt
+    # ============================================
+    SYNTHESIS_PROMPT = (
         f"You are a medical research synthesizer. The user searched PubMed for: '{query}'.\n\n"
         "Synthesize the following abstracts into a structured, evidence-based summary "
         "for a healthcare professional. Use plain language where possible, but preserve "
@@ -1824,13 +1848,13 @@ def summarize_pubmed_query(query: str, max_results: int = 5) -> tuple[str, List[
 
     # Use the lightweight model for cost efficiency; swap to "gpt-4o" if you want deeper analysis
     summarizer = ChatOpenAI(
-        model="gpt-4o-mini",
+        model=QAmodel['gpt-mini'],
         api_key=OPENAI_API_KEY,
         temperature=0.2,
         max_tokens=1500,
     )
 
-    response = summarizer.invoke([{"role": "user", "content": synthesis_prompt}])
+    response = summarizer.invoke([{"role": "user", "content": SYNTHESIS_PROMPT}])
     return response.content, articles        
         
 
@@ -1865,7 +1889,7 @@ with gr.Blocks() as demo:
     
         with gr.Row():
             
-            with gr.Column(scale=3):
+            with gr.Column(scale=3, elem_classes="main-col"):
                 chatbot = gr.Chatbot(
                     label="Conversation History", 
                     height=400,
@@ -1873,7 +1897,8 @@ with gr.Blocks() as demo:
                 )
 
                 # Feedback UI
-                with gr.Row():
+                #with gr.Column(elem_classes="feedback-group"):    
+                with gr.Row(elem_classes="tight-feedback"):
                     gr.Textbox(
                         value="Rate this response:", 
                         show_label=False, 
@@ -1884,13 +1909,20 @@ with gr.Blocks() as demo:
                     btn_up = gr.Button("👍", scale=0, min_width=50, variant="secondary")
                     btn_down = gr.Button("👎", scale=0, min_width=50, variant="secondary")
                 fb_comment = gr.Textbox(
-                    placeholder="Optional: why was this helpful or not? (sent to LangSmith)",
-                    show_label=False, lines=1
+                    placeholder="Optional (type feedback here..): why was this helpful or not? (sent to LangSmith)",
+                    show_label=False,
+                    lines=1,
+                    container=False,
+                    elem_classes=["prompt-box", "tight-comment"]
                 )
                 fb_status = gr.Textbox(
-                    value="", show_label=False, interactive=False
-                )                
-                
+                    value="", 
+                    show_label=False, 
+                    interactive=False,
+                    container=False,
+                    visible=False     # hides the empty bar until needed
+                )
+                 
                 txt_input = gr.Textbox(
                     show_label=False, 
                     placeholder="Type your medical question here...", 
@@ -1920,9 +1952,9 @@ with gr.Blocks() as demo:
                         )
                         image_question = gr.Textbox(
                             placeholder="Ask about this image (e.g., 'Is this fracture healed?', 'Explain this chest X-ray')",
-                            label="Question about image",
+                            label="Ask a question about image",
                             value="Please provide a detailed medical analysis of this image.",
-                            lines=2
+                            lines=2, elem_classes="prompt-box"
                         )
                     with gr.Column(scale=1, min_width=120):
                         audio_input = gr.Audio(sources=['microphone'], type="filepath", label="🎤 Record")
@@ -1987,7 +2019,7 @@ with gr.Blocks() as demo:
 
             # Right: draft preview + events
             with gr.Column():
-                # ✅ Standard Gradio pattern: create + enter context in one statement
+                # Standard Gradio pattern: create + enter context in one statement
                 with gr.Column(visible=False) as draft_container:
                     gr.Markdown("### 📧 Pending Email Draft")
                     cal_draft_md = gr.Markdown()
@@ -2001,7 +2033,7 @@ with gr.Blocks() as demo:
                 events_view = gr.JSON(label="Upcoming Events")     
 
         # ============================================
-        # Event handlers (no components created here — safe to define inline)
+        # Calendar event handlers
         # ============================================
         def fmt_cal_draft(pending):
             if not pending:
@@ -2020,7 +2052,7 @@ with gr.Blocks() as demo:
                 return "", history, "", None, gr.update(visible=False), ""
 
             result = calendar_agent.chat(message.strip())
-            # ✅ Dict format (same as MedIntel tab)
+            # Dict format (same as MedIntel tab)
             history.append({"role": "user", "content": message.strip()})
             history.append({"role": "assistant", "content": result["reply"]})
             pending = result.get("pending_email")
@@ -2056,9 +2088,12 @@ with gr.Blocks() as demo:
             raw = calendar_agent._list_upcoming_events(max_results=5)
             return json.loads(raw)
         
+        # ============================================
+        # Feedback button event handler
+        # ============================================        
         def submit_feedback(run_id, rating, comment=""):
             if not run_id:
-                return "⚠️ Send a message first to enable rating."
+                return gr.Textbox(value="⚠️ Send a message first to enable rating.", visible=True)
             
             score = 1.0 if rating == "up" else 0.0
             
@@ -2069,9 +2104,9 @@ with gr.Blocks() as demo:
                     score=score,
                     comment=comment or None,
                 )
-                return "✅ Feedback saved to LangSmith."
+                return gr.Textbox(value="✅ Feedback saved to LangSmith.", visible=True)
             except Exception as e:
-                return f"❌ LangSmith error: {str(e)}"            
+                return gr.Textbox(value=f"❌ LangSmith error: {str(e)}", visible=True)           
         
         # ============================================
         # Bind events
@@ -2153,6 +2188,7 @@ with gr.Blocks() as demo:
                     placeholder="e.g., 'GLP-1 agonists cardiovascular outcomes 2024' or 'pneumonia treatment guidelines'",
                     lines=2
                 )
+                
                 pubmed_max_results = gr.Slider(
                     minimum=1, maximum=10, value=5, step=1,
                     label="Max Articles to Retrieve"
@@ -2234,13 +2270,28 @@ with gr.Blocks() as demo:
         )
 
     # ===========================================
-    # Function that enables LLM to respond to user prompts/actions
+    # Helper to keep history code 
+    # ===========================================
+    def _append_turn(history, user_text, assistant_text):
+        out = []
+        for msg in history:
+            if isinstance(msg, dict):
+                out.append({
+                    "role": msg.get("role", "user"),
+                    "content": str(msg.get("content", ""))
+                })
+        out.append({"role": "user", "content": user_text})
+        out.append({"role": "assistant", "content": assistant_text})
+        return out        
+
+    # ===========================================
+    # Function enables LLM to respond to user prompts/actions
     # ===========================================
     @traceable(run_type="chain", name="MedIntel Respond")
     def respond(user_input, chat_history):
         print(f"DEBUG user_input type: {type(user_input)}, value: {repr(user_input)}")
         
-        # --- CAPTURE LANGSMITH RUN ID ---
+        # CAPTURE LANGSMITH RUN ID
         try:
             run_tree = get_current_run_tree()
             current_run_id = run_tree.id if run_tree else None
@@ -2287,7 +2338,7 @@ with gr.Blocks() as demo:
     # Function to process images
     # ===========================================
     @traceable(run_type="chain", name="MedIntel Image Analysis")
-    def process_image_for_chat(image_file_path_str, image_question, chat_history):
+    async def process_image_for_chat(image_file_path_str, image_question, chat_history):
         print(f"DEBUG: image={image_file_path_str}, question={image_question}")
 
         if chat_history is None:
@@ -2301,17 +2352,24 @@ with gr.Blocks() as demo:
             temp_display = list(chat_history) + [{"role": "assistant", "content": error_message}]
             return temp_display, None
 
-        # Default prompt if user left it blank
+        # Image question default prompt if user left it blank
         if not image_question or not image_question.strip():
             image_question = "Please provide a detailed medical analysis of this image."
 
+        # MODERATION CHECK (reuses base64 for vision call)
+        #is_flagged, base64_image, mime_type = await check_image_moderation_flag(image_file_path_str)
+        
+        #if is_flagged:
+        #    error_message = "⚠️ Image flagged by safety moderation. Please upload an appropriate medical image."
+        #    temp_display = list(chat_history) + [{"role": "assistant", "content": error_message}]
+        #    return temp_display, None
+
+        # Encode image for OpenAI vision
+        base64_image, mime_type = _encode_image_to_base64(image_file_path_str)       
+        # Use the base64 from moderation check        
+        data_url = f"data:{mime_type};base64,{base64_image}"
+
         try:
-            # Encode image for OpenAI vision
-            base64_image, mime_type = _encode_image_to_base64(image_file_path_str)
-            data_url = f"data:{mime_type};base64,{base64_image}"
-
-            from langchain_core.messages import HumanMessage, SystemMessage
-
             messages = [
                 SystemMessage(content=(
                     "You are an expert medical imaging assistant with training in radiology, "
@@ -2332,7 +2390,7 @@ with gr.Blocks() as demo:
                 ])
             ]
 
-            response = vision_model.invoke(messages)
+            response = await vision_model.ainvoke(messages)
             analysis = response.content
 
             updated_chat_history.append({
@@ -2359,7 +2417,7 @@ with gr.Blocks() as demo:
         return updated_chat_history, None
             
     # ===========================================
-    # Event Calls
+    # Bind events
     # ===========================================
     transcribe_button.click(
         speech_to_text,
@@ -2382,13 +2440,14 @@ with gr.Blocks() as demo:
 # ===========================================
 def signal_handler(sig, frame):
     print('Shutting down gracefully...')
-    demo.close()  # Close Gradio properly
+    demo.close()  # Close gradio properly
     sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 if __name__ == "__main__":
+    demo.queue(default_concurrency_limit=2)
     demo.launch(theme=medical_theme,
         server_name="0.0.0.0",
         server_port=7860,
