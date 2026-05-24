@@ -61,12 +61,10 @@ sys.path.insert(0, './MedIntel')
 import html
 ls_client = Client()
 
-
 # ============================================
 # LangSmith Tracing Set to False on StartUp
 # ============================================
 os.environ.setdefault("LANGSMITH_TRACING_V2", "false")
-
 
 # ============================================
 # CSS for Gradio UI elements
@@ -98,10 +96,11 @@ body { font-size: 18px !important; }
 }
 """
 
-
+# =============================================
+# Tool call tracker for Metrics Dashboard
 # Live scalar: how many tool calls are in-flight *right now*
+# =============================================
 _current_pending = 0
-
 
 # =============================================
 # In-memory metrics needed for Metrics Dashboard
@@ -115,17 +114,14 @@ metrics = {
     "pending": []      # pending requests
 }
 
-
 # ============================================
 # Fix for the asyncio cleanup error
 # ============================================
 if sys.platform == "linux":
     asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
-
 device = "cuda" if torch.cuda.is_available() else "cpu"    
     
-
 # ============================================
 # Gradio - Create a custom theme with medical blue
 # ============================================
@@ -140,7 +136,6 @@ medical_theme = gr.themes.Soft(
     button_primary_border_color_dark="#004d99",
 )
 
-
 # ============================================
 # Model configurations
 # ============================================
@@ -154,9 +149,9 @@ QAmodel = {
     "blip6.7": "Salesforce/blip2-opt-6.7b",
     "whisper": "turbo",
     "embed-model": "sentence-transformers/all-MiniLM-L6-v2",
+    "embed-large-model": "sentence-transformers/all-mpnet-base-v2",
     "omni-latest": "omni-moderation-latest"
 }
-
 
 # ============================================
 # Get API Keys & Tokens
@@ -167,15 +162,14 @@ hf_token = os.getenv('HUGGINGFACE_API_KEY')
 if hf_token:
     # Authenticate silently without prompting
     login(token=hf_token, add_to_git_credential=True)
-    print("Successfully authenticated with Hugging Face Hub")
+    print("✓ Successfully authenticated with Hugging Face Hub")
 else:
     print("Warning: HF_TOKEN not found. Some features may be limited.")
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
 NCBI_API_KEY = os.getenv("NCBI_API_KEY")  # PubMed Search, Optional, increases rate limit to 10/sec
-print("Successfully loaded environment variables")
-
+print("✓ Successfully loaded environment variables")
 
 # ============================================
 # System prompt
@@ -187,10 +181,20 @@ SYSTEM_PROMPT = (
     "or personal recommendations (e.g. 'what should I do', 'how can I', 'I have', 'I'm experiencing'), "
     "you MUST then use 'youtube_links_tool' and naturally embed the returned video links in your response. "
     "Do NOT invent or hallucinate YouTube links. Only use links returned by the tool. "
-    "Keep answers concise. Use three sentences maximum. "
+    "Keep answers concise. Use eight sentences maximum. "
     "If question contains keyword 'BMI', you MUST only use the 'calculate_bmi' tool call. "
+    "Example:\n"
+    "Query: 'How do SGLT2 inhibitors reduce heart failure hospitalizations in diabetic patients?'"
+    "Structure your response following the EXACT same format with bullet points as in the example. "
+    ". SGLT2 inhibitors reduce heart failure hospitalizations in diabetic patients mainly by: "
+    
+    ". Increasing urinary glucose and sodium excretion → mild diuresis and reduced fluid overload"
+    ". Lowering blood pressure → decreasing cardiac workload "
+    ". Improving heart metabolism through ketone utilization "
+    ". Protecting the kidneys → reducing cardiorenal stress "
+    
+    ". These combined effects improve heart function and reduce hospitalizations, beyond just lowering blood sugar. "
 )
-
 
 # ============================================
 # Medical disclaimer
@@ -198,7 +202,6 @@ SYSTEM_PROMPT = (
 MEDICAL_DISCLAIMER = (
     "According to medical websites, including MedlinePlus, Cleveland Clinic and Mayo Clinic,"
 )
-
 
 # ============================================
 # Classifier prompt
@@ -222,6 +225,41 @@ CLASSIFIER_PROMPT = (
     "Query: '{user_query}' ->"
 )
 
+# ============================================
+# PubMed synthesis prompt
+# ============================================
+SYNTHESIS_PROMPT = (
+    "You are a medical research synthesizer. The user searched PubMed for: "
+    "'{user_query}'.\n\n"
+    "Synthesize the following abstracts into a structured, evidence-based summary "
+    "for a healthcare professional. Use plain language where possible, but preserve "
+    "medical precision.\n\n"
+    "Structure your response with these sections:\n"
+    "1. **Key Findings** — bullet points of major conclusions from each paper [1], [2], etc.\n"
+    "2. **Clinical Consensus** — what the evidence broadly agrees on\n"
+    "3. **Gaps & Controversies** — conflicting results or unanswered questions\n"
+    "4. **Bottom Line** — 2-3 sentence practical takeaway for clinicians\n\n"
+    "'{context}'\n\n"
+    "Cite paper numbers [1], [2] when referencing specific findings. "
+    "If abstracts are limited, note the limitation honestly."
+)
+
+# ============================================
+# Vision prompt
+# ============================================
+VISION_PROMPT = (
+    "You are an expert medical imaging assistant with training in radiology, "
+    "pathology, and clinical medicine.\n\n"
+    "Structure your analysis as follows when relevant:\n"
+    "1. **Modality & Region** — imaging type (X-ray, MRI, CT, etc.) and view\n"
+    "2. **Visible Anatomy** — normal structures and orientation\n"
+    "3. **Key Findings** — abnormalities, lesions, fractures, effusions, masses. "
+    "Explain medical terms in parentheses for non-experts.\n"
+    "4. **Devices / Artifacts** — hardware, catheters, contrast, implants\n"
+    "5. **Overall Impression** — plain-language summary of clinical significance\n\n"
+    "⚠️ Always end with: *This AI analysis is for informational purposes only "
+    "and is not a medical diagnosis. Please consult a qualified healthcare provider.*"    
+)
 
 # ============================================
 # Inference Model
@@ -231,7 +269,7 @@ inference_model = ChatOpenAI(
     api_key=OPENAI_API_KEY, 
     temperature=0    
 )
-
+print("✓ Inference model loaded")
 
 # ============================================
 # Classifier Model
@@ -241,18 +279,41 @@ classifier_model = ChatOpenAI(
     api_key=OPENAI_API_KEY, 
     temperature=0
 )
-
+print("✓ Classifier model loaded")
 
 # ============================================
 # Vision Model for Analyzing Images/Scans
 # ============================================
 vision_model = ChatOpenAI(
-    model=QAmodel['gpt-mini'],  # or "gpt-4o" for higher detail
+    model=QAmodel['gpt-mini'],  # "gpt-4o" for higher detail
     api_key=OPENAI_API_KEY,
     temperature=0.3,
     max_tokens=1500,
 )
+print("✓ Vision model loaded")
 
+# ============================================
+# Embedding Model
+# ============================================
+# This will be pre-downloaded by preload_from_hub
+embedding_model = HuggingFaceEmbeddings(
+    model_name=QAmodel["embed-model"],
+    cache_folder="/tmp/.cache"  # Use tmp for Spaces
+)
+print("✓ Embedding model loaded")
+
+# ============================================
+# Load OpenAI Whisper model / faster whisper
+# ============================================
+#print("🔄 Loading Whisper model...")
+# Use CPU or CUDA if available
+# Commented as this is causing an issue
+#whisper_model = WhisperModel(QAmodel["whisper"], device="cpu", compute_type="int8")
+#print("✓ Whisper model loaded
+
+print("🔄 Loading OpenAI Whisper model...")
+whisper_model = whisper.load_model(QAmodel["whisper"])
+print("✓ OpenAI Whisper model loaded")
 
 # Global flags to track state across agent invocations
 global _kb_had_results
@@ -264,20 +325,12 @@ is_medical_query = False # Initialize globally
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 _dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-
 # =================================================================
 # PRE-LOAD AT MODULE LEVEL (before UI)
 # =================================================================
 # ============================================
-# Load existing vector store/embedding model
+# Load existing vector store
 # ============================================
-print("🔄 Loading embedding model...")
-# This will be pre-downloaded by preload_from_hub
-embedding_model = HuggingFaceEmbeddings(
-    model_name=QAmodel["embed-model"],
-    cache_folder="/tmp/.cache"  # Use tmp for Spaces
-)
-
 print("🔄 Loading Chroma vector store...")
 persist_directory = './chroma_db_hf_rerun2'
 
@@ -297,23 +350,8 @@ vectordb = Chroma(
 doc_count = vectordb._collection.count()
 print(f"✓ Loaded vector store with {doc_count} documents using HuggingFace embeddings")
 
-
 # ============================================
-# Load faster whisper
-# ============================================
-#print("🔄 Loading Whisper model...")
-# Use CPU or CUDA if available
-# Commented as this is causing an issue
-#whisper_model = WhisperModel(QAmodel["whisper"], device="cpu", compute_type="int8")
-#print("✓ Whisper model loaded
-
-print("🔄 Loading OpenAI Whisper model...")
-whisper_model = whisper.load_model(QAmodel["whisper"])
-print("✓ OpenAI Whisper model loaded")
-
-
-# ============================================
-# Helper Function to return GPU Utilization for Dashboard
+# Metrics Dashboard - Helper function to return GPU Utilization
 # ============================================
 def get_gpu_utilization():
     """Returns GPU utilization %, or 0.0 if no NVIDIA GPU is found."""
@@ -337,7 +375,6 @@ def get_gpu_utilization():
         pass
 
     return 0.0
-
 
 # ============================================
 # Display Metrics Dashboard
@@ -583,7 +620,6 @@ def show_dashboard():
     
     return summary_html, latency_fig, count_fig, tool_calls_fig, errors_fig, heatmap_fig
     
-
 # =======================================
 # Image Encoder Helper
 # =======================================
@@ -600,7 +636,7 @@ def _encode_image_to_base64(image_path: str) -> tuple[str, str]:
 
 # =======================================
 # Image Moderation Flag
-# ====================================
+# =======================================
 async def check_image_moderation_flag(image_path: str) -> Tuple[bool, str]:
     """
     Returns (is_flagged, base64_image, mime_type).
@@ -679,6 +715,17 @@ def _extract_kb_answer(raw: str) -> str | None:
     # Raw content fallback
     stripped = raw.strip()
     return stripped if stripped else None
+
+# =======================================
+# Function to decide if a treatment question or not.
+# =======================================
+def _is_treatment_question(text: str) -> bool:
+    t = text.lower().strip()
+
+    # Treatment question
+    is_treatment = any(p in t for p in ["prescribe","can you prescribe",])
+    if is_treatment:
+        return True      
 
 # =======================================
 # Function to decide if personal advice/treatment questions or not.
@@ -925,7 +972,6 @@ def _is_poor_kb_answer(answer: str) -> bool:
     
     return False
 
-
 # =======================================
 # Wrap a tool to automatically track metrics
 # =======================================
@@ -956,7 +1002,6 @@ def track_tool_calls(func):
         return result
     return wrapper
 
-
 # =======================================
 # Global Tool Definitions
 # =======================================
@@ -983,10 +1028,10 @@ def calculate_bmi(
     imperial_provided = weight_lbs is not None and height_ft is not None
 
     if metric_provided and imperial_provided:
-        return "Error: Please provide either metric (kg, m) OR imperial (lbs, ft), not both."
+        return "❌ Error: Please provide either metric (kg, m) OR imperial (lbs, ft), not both."
     
     if not metric_provided and not imperial_provided:
-        return "Error: Please provide both weight and height. Use metric (weight_kg, height_m) or imperial (weight_lbs, height_ft)."
+        return "❌ Error: Please provide both weight and height. Use metric (weight_kg, height_m) or imperial (weight_lbs, height_ft)."
     
     # Use explicit working variables to avoid NoneType concerns
     if imperial_provided:
@@ -1018,15 +1063,38 @@ def retrieve_context(query: str) -> str:
     """Retrieve relevant context from knowledge base for a question."""
     global _kb_had_results # Declare intent to modify global variable
     try:
-        # Ensure vectordb is accessible (it's loaded globally)
-        docs = vectordb.max_marginal_relevance_search(query, k=1, fetch_k=1)
+        # Return docs and relevance scores in the range [0, 1]. 0 is dissimilar, 1 is most similar.
+        docs = vectordb.similarity_search_with_relevance_scores(query, k=1)
         if not docs:
             _kb_had_results = False
             return "No relevant information found in knowledge base."
         else:
-            _kb_had_results = True
-            print(f"Retrieved {len(docs)} document(s)")
-            return "\n\n".join([f"Source {i+1}:\n{doc.page_content[:500]}..." for i, doc in enumerate(docs)])
+            # Set a score threshold and compare the score with
+            score_threshold = 0.5
+            scores = []
+            # Print similarity score
+            for doc, score in docs:
+                print(f"DEBUG: Similarity Score: {score}")
+                scores.append(score)
+            
+            # Skip KB search results and let LLM synthesize response if score < 0.5
+            if scores[0] < score_threshold:
+                _kb_had_results = False
+                return "No relevant information found in knowledge base."
+
+            filtered_docs = [(doc, score) for doc, score in docs if score >= score_threshold]
+            if not filtered_docs:
+                _kb_had_results = False
+                return "No relevant information found in knowledge base."
+            else:            
+                # Get the returned documents
+                _kb_had_results = True
+                print(f"Retrieved {len(filtered_docs)} document(s)")
+                return "\n\n".join([
+                    f"Source {i+1}:\n{doc.page_content[:500]}..." 
+                    for i, (doc, score) in enumerate(filtered_docs)
+                ])                
+    
     except Exception as e:
         _kb_had_results = False
         print(f"Error in retrieve_context tool: {e}")
@@ -1038,7 +1106,8 @@ def youtube_links_tool(query: str) -> str:
     """Search for video tutorials."""
     
     video_query = f"{query} site:youtube.com"
-    
+
+    # Retry three times in case first attempt fails
     for attempt in range(3):
         try:
             ddgs = DDGS()
@@ -1074,7 +1143,7 @@ def pubmed_tool(query: str) -> str:
     return summary
     
 # =======================================
-# Available Q&A Tools for LangChain Agent
+# Q&A Tools for LangChain Agent
 # =======================================
 tools = [retrieve_context, youtube_links_tool, calculate_bmi]
 
@@ -1092,6 +1161,7 @@ def medical_classifier(state: AgentState, runtime: Runtime) -> Dict[str, Any] | 
         (m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
         None
     )
+    
     if user_message is None:
         return None
 
@@ -1100,10 +1170,12 @@ def medical_classifier(state: AgentState, runtime: Runtime) -> Dict[str, Any] | 
 
     try:
         class_prompt = CLASSIFIER_PROMPT.replace("{user_query}", user_query)
+        
         class_result = classifier_model.invoke(
             [{"role": "user", "content": class_prompt}],
             temperature=0.0
         )
+        
         is_medical = "YES" in class_result.content.upper()
         print(f"[Medical_Classifier] User Query: '{user_query}' -> Classifier Result: '{class_result.content}'")
     except Exception as e:
@@ -1157,6 +1229,7 @@ class disclaimermiddleware(AgentMiddleware):
         is_medical_query = True
         _kb_had_results = False
 
+        # Disclaimer
         last_msg.content = (
             f"According to medical websites, including MedlinePlus, Cleveland Clinic and Mayo Clinic, "
             f"{last_msg.content}"
@@ -1183,7 +1256,7 @@ class disclaimermiddleware(AgentMiddleware):
         return state
 
 # =======================================
-# Synthesizer for LLM response
+# Synthesize LLM response
 # =======================================
 synthesizer = SummarizationMiddleware(
     model=inference_model,
@@ -1192,10 +1265,8 @@ synthesizer = SummarizationMiddleware(
     system_prompt="Synthesize key points, action items, and recent context.",
 )
 
-
 toolselector = LLMToolSelectorMiddleware(model=QAmodel.get('gpt-mini'),system_prompt="",max_tools=5)
 toolretry = ToolRetryMiddleware(max_retries=3,backoff_factor=2.0,retry_on=[TimeoutError,httpx.NetworkError])
-
 
 # =======================================
 # LangChain - Global Agent Setup
@@ -1211,7 +1282,6 @@ agent = create_agent(
         disclaimermiddleware()
     ],
 )
-
 
 # ===========================================
 # PubMed Helper Functions
@@ -1229,7 +1299,6 @@ def _strip_markdown(text: str) -> str:
     text = re.sub(r'(?m)^[-*]\s+', '* ', text)            # bullets → ASCII asterisk
     return text.strip()
 
-
 def _pdf_safe(text: str) -> str:
     """
     Replace common Unicode punctuation with ASCII equivalents, then strip
@@ -1244,7 +1313,6 @@ def _pdf_safe(text: str) -> str:
     # Drop any remaining non-ASCII characters
     text = unicodedata.normalize('NFKD', text)
     return text.encode('ascii', 'ignore').decode('ascii')
-
 
 # ===========================================
 # PubMed Pdf Generator Function
@@ -1336,7 +1404,6 @@ def generate_pubmed_pdf(query: str, summary_md: str, articles: List[Dict]) -> st
     pdf.output(output_path)
     return output_path
 
-
 # ===========================================
 # PubMed HTML Report Generator Function
 # ===========================================
@@ -1407,7 +1474,6 @@ def generate_pubmed_html(query: str, summary_md: str, articles: List[Dict]) -> s
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(parts))
     return output_path  
-
     
 # ===========================================
 # GENERATE-CHAT FUNCTION for Q&A (Invokes the LangChain agent)
@@ -1480,6 +1546,16 @@ def generate_chat(user_input, chat_history):
     # 2. Classification (same logic as medical_classifier)
     # Definition questions are always treated as medical in this Q&A app
     is_medical = _is_definition_question(user_input)
+    
+    # Is a treatment question or not
+    is_treatment = _is_treatment_question(user_input)
+    
+    if not is_medical and is_treatment:
+        updated = list(chat_history)
+        updated.append({"role": "user", "content": user_input})
+        updated.append({"role": "assistant", "content": "I apologize, I cannot prescribe medication. Please consult with a Doctor."})
+        return clean_chat_history(updated)
+        
     if is_medical:
         print(f"[Classification] Definition question detected, bypassing classifier: '{user_input}'")
     else:
@@ -1601,7 +1677,6 @@ def generate_chat(user_input, chat_history):
         updated.append({"role": "assistant", "content": error_msg})
         return clean_chat_history(updated)
         
-
 # ===========================================
 # Function to transform OCR to text
 # ===========================================
@@ -1638,6 +1713,75 @@ def image_to_text_processor(image_path, processor, model, device, dtype, vtmodel
     except Exception as e:
         return f"Error processing image: {str(e)}"
 
+# ===========================================
+# Function to process images
+# ===========================================
+@traceable(run_type="chain", name="MedIntel Image Analysis")
+async def process_image_for_chat(image_file_path_str, image_question, chat_history):
+    print(f"DEBUG: image={image_file_path_str}, question={image_question}")
+
+    if chat_history is None:
+        chat_history = []
+
+    updated_chat_history = list(chat_history)
+
+    # Validation
+    if image_file_path_str is None or not isinstance(image_file_path_str, str) or not os.path.isfile(image_file_path_str):
+        error_message = "❌ Error: Please upload a valid medical image."
+        temp_display = list(chat_history) + [{"role": "assistant", "content": error_message}]
+        return temp_display, None
+
+    # Image question default prompt if user left it blank
+    if not image_question or not image_question.strip():
+        image_question = "Please provide a detailed medical analysis of this image."
+
+    # MODERATION CHECK (reuses base64 for vision call)
+    #is_flagged, base64_image, mime_type = await check_image_moderation_flag(image_file_path_str)
+    
+    #if is_flagged:
+    #    error_message = "⚠️ Image flagged by safety moderation. Please upload an appropriate medical image."
+    #    temp_display = list(chat_history) + [{"role": "assistant", "content": error_message}]
+    #    return temp_display, None
+
+    # Encode image for OpenAI vision
+    base64_image, mime_type = _encode_image_to_base64(image_file_path_str)       
+    # Use the base64 from moderation check        
+    data_url = f"data:{mime_type};base64,{base64_image}"
+
+    try:
+        messages = [
+            SystemMessage(content= VISION_PROMPT),
+            HumanMessage(content=[
+                {"type": "text", "text": image_question},
+                {"type": "image_url", "image_url": {"url": data_url}}
+            ])
+        ]
+        
+        response = await vision_model.ainvoke(messages)
+        analysis = response.content
+        
+        updated_chat_history.append({
+            "role": "user",
+            "content": f"📎 Image: {image_question}"
+        })
+        updated_chat_history.append({
+            "role": "assistant",
+            "content": analysis
+        })
+
+    except Exception as e:
+        error_message = f"⚠️ Error analyzing image: {str(e)}"
+        print(error_message)
+        updated_chat_history.append({
+            "role": "user",
+            "content": f"📎 Image: {image_question}"
+        })
+        updated_chat_history.append({
+            "role": "assistant",
+            "content": error_message
+        })
+
+    return updated_chat_history, None        
 
 # ===========================================
 # Function to transcribe audio to text
@@ -1718,7 +1862,6 @@ def speech_to_text(audio_input, chat_history):
         clean_history.append({"role": "assistant", "content": error_message})
         return "", clean_chat_history(clean_history)
 
-
 # ============================================
 # Functions for PubMed Search
 # ============================================
@@ -1739,7 +1882,6 @@ def _search_pubmed_ids(query: str, max_results: int = 5) -> List[str]:
     resp.raise_for_status()
     data = resp.json()
     return data.get("esearchresult", {}).get("idlist", [])
-
 
 def _fetch_pubmed_articles(pmids: List[str]) -> List[Dict[str, str]]:
     """Fetch title, abstract, authors, and year for a list of PMIDs."""
@@ -1802,11 +1944,10 @@ def _fetch_pubmed_articles(pmids: List[str]) -> List[Dict[str, str]]:
 
     return articles
 
-
 def summarize_pubmed_query(query: str, max_results: int = 5) -> tuple[str, List[Dict]]:
     """
     Search PubMed and return (markdown_summary, raw_articles_list).
-    Uses the existing GPT-4o-mini / gpt-4o model for synthesis.
+    Uses existing GPT-4o-mini / gpt-4o model for synthesis.
     """
     pmids = _search_pubmed_ids(query, max_results)
     if not pmids:
@@ -1816,7 +1957,7 @@ def summarize_pubmed_query(query: str, max_results: int = 5) -> tuple[str, List[
     if not articles:
         return "Found article IDs but could not retrieve abstracts.", []
 
-    # ── Build prompt for LLM synthesis ──
+    # Build prompt for LLM synthesis
     paper_blocks = []
     for i, art in enumerate(articles, 1):
         author_line = ", ".join(art["authors"][:3]) + (" et al." if len(art["authors"]) > 3 else "")
@@ -1825,44 +1966,27 @@ def summarize_pubmed_query(query: str, max_results: int = 5) -> tuple[str, List[
             f"    Authors: {author_line} | Year: {art['year']}\n"
             f"    Abstract: {art['abstract']}"
         )
-
+    
     context = "\n\n".join(paper_blocks)
-
-    # ============================================
-    # PubMed synthesis prompt
-    # ============================================
-    SYNTHESIS_PROMPT = (
-        f"You are a medical research synthesizer. The user searched PubMed for: '{query}'.\n\n"
-        "Synthesize the following abstracts into a structured, evidence-based summary "
-        "for a healthcare professional. Use plain language where possible, but preserve "
-        "medical precision.\n\n"
-        "Structure your response with these sections:\n"
-        "1. **Key Findings** — bullet points of major conclusions from each paper [1], [2], etc.\n"
-        "2. **Clinical Consensus** — what the evidence broadly agrees on\n"
-        "3. **Gaps & Controversies** — conflicting results or unanswered questions\n"
-        "4. **Bottom Line** — 2-3 sentence practical takeaway for clinicians\n\n"
-        f"{context}\n\n"
-        "Cite paper numbers [1], [2] when referencing specific findings. "
-        "If abstracts are limited, note the limitation honestly."
-    )
-
+    
+    search_prompt = SYNTHESIS_PROMPT.replace("{user_query}", query)
+    search_prompt = search_prompt.replace("{context}", context)    
+    
     # Use the lightweight model for cost efficiency; swap to "gpt-4o" if you want deeper analysis
-    summarizer = ChatOpenAI(
+    pubmed_search_model = ChatOpenAI(
         model=QAmodel['gpt-mini'],
         api_key=OPENAI_API_KEY,
         temperature=0.2,
         max_tokens=1500,
     )
-
-    response = summarizer.invoke([{"role": "user", "content": SYNTHESIS_PROMPT}])
+    
+    response = pubmed_search_model.invoke([{"role": "user", "content": search_prompt}])
     return response.content, articles        
-        
-
+    
 # ============================================
 # Instantiate Calendar Agent
 # ============================================
 calendar_agent = CalendarAgent(session_id="user_001", mock_mode=True)
-
 
 # ===========================================
 # Create the Gradio app - UI
@@ -1886,7 +2010,7 @@ with gr.Blocks() as demo:
         model_choice = QAmodel['gpt-mini']    
         vtmodel_id = QAmodel['blip']
         run_id_state = gr.State(value=None)
-    
+        
         with gr.Row():
             
             with gr.Column(scale=3, elem_classes="main-col"):
@@ -1908,13 +2032,15 @@ with gr.Blocks() as demo:
                     )
                     btn_up = gr.Button("👍", scale=0, min_width=50, variant="secondary")
                     btn_down = gr.Button("👎", scale=0, min_width=50, variant="secondary")
+                    
                 fb_comment = gr.Textbox(
-                    placeholder="Optional (type feedback here..): why was this helpful or not? (sent to LangSmith)",
+                    placeholder="Optional (type feedback here...): why was this helpful or not? (sent to LangSmith)",
                     show_label=False,
                     lines=1,
                     container=False,
                     elem_classes=["prompt-box", "tight-comment"]
                 )
+                
                 fb_status = gr.Textbox(
                     value="", 
                     show_label=False, 
@@ -1922,7 +2048,7 @@ with gr.Blocks() as demo:
                     container=False,
                     visible=False     # hides the empty bar until needed
                 )
-                 
+                
                 txt_input = gr.Textbox(
                     show_label=False, 
                     placeholder="Type your medical question here...", 
@@ -1939,23 +2065,27 @@ with gr.Blocks() as demo:
                                 scale=0,
                                 min_width=220
                             )
+                            
                             image_to_text_btn = gr.Button(
                                 "🔬 Analyze Image", 
                                 variant="secondary", 
                                 scale=0, 
                                 min_width=220
                             )
+                            
                         preview = gr.Image(
                             label="Preview", 
                             visible=False, 
                             height=180
                         )
+                        
                         image_question = gr.Textbox(
                             placeholder="Ask about this image (e.g., 'Is this fracture healed?', 'Explain this chest X-ray')",
                             label="Ask a question about image",
                             value="Please provide a detailed medical analysis of this image.",
                             lines=2, elem_classes="prompt-box"
                         )
+                        
                     with gr.Column(scale=1, min_width=120):
                         audio_input = gr.Audio(sources=['microphone'], type="filepath", label="🎤 Record")
                         transcribe_button = gr.Button("🎤 Transcribe & Submit", variant="secondary")
@@ -1964,9 +2094,8 @@ with gr.Blocks() as demo:
                     submit_btn = gr.Button("💬 Submit Question", variant="primary", scale=1)
                     clear_btn = gr.ClearButton(value="🗑️ Clear Chat", scale=0)
                  
-
     # ============================================
-    # # Metrics Dashboard Tab
+    # Metrics Dashboard Tab
     # ============================================
     with gr.Tab("Metrics Dashboard",visible=False):
         summary_md = gr.Markdown()        
@@ -2003,6 +2132,7 @@ with gr.Blocks() as demo:
                         label="Your request",
                         placeholder="e.g. Find a free slot Thursday and book a meeting with Alice",
                     )
+                    
                     cal_audio = gr.Audio(
                         sources=["microphone"],
                         type="filepath",
@@ -2156,6 +2286,7 @@ with gr.Blocks() as demo:
             inputs=[run_id_state, fb_comment],
             outputs=fb_status
         )
+        
         btn_down.click(
             lambda rid, c: submit_feedback(rid, "down", c),
             inputs=[run_id_state, fb_comment],
@@ -2333,88 +2464,6 @@ with gr.Blocks() as demo:
             clean_input = extract_gradio_text(user_input) if isinstance(user_input, (list, dict)) else str(user_input)
             updated = _append_turn(chat_history, clean_input, error_message)
             return "", updated, current_run_id
-    
-    # ===========================================
-    # Function to process images
-    # ===========================================
-    @traceable(run_type="chain", name="MedIntel Image Analysis")
-    async def process_image_for_chat(image_file_path_str, image_question, chat_history):
-        print(f"DEBUG: image={image_file_path_str}, question={image_question}")
-
-        if chat_history is None:
-            chat_history = []
-
-        updated_chat_history = list(chat_history)
-
-        # Validation
-        if image_file_path_str is None or not isinstance(image_file_path_str, str) or not os.path.isfile(image_file_path_str):
-            error_message = "❌ Error: Please upload a valid medical image."
-            temp_display = list(chat_history) + [{"role": "assistant", "content": error_message}]
-            return temp_display, None
-
-        # Image question default prompt if user left it blank
-        if not image_question or not image_question.strip():
-            image_question = "Please provide a detailed medical analysis of this image."
-
-        # MODERATION CHECK (reuses base64 for vision call)
-        #is_flagged, base64_image, mime_type = await check_image_moderation_flag(image_file_path_str)
-        
-        #if is_flagged:
-        #    error_message = "⚠️ Image flagged by safety moderation. Please upload an appropriate medical image."
-        #    temp_display = list(chat_history) + [{"role": "assistant", "content": error_message}]
-        #    return temp_display, None
-
-        # Encode image for OpenAI vision
-        base64_image, mime_type = _encode_image_to_base64(image_file_path_str)       
-        # Use the base64 from moderation check        
-        data_url = f"data:{mime_type};base64,{base64_image}"
-
-        try:
-            messages = [
-                SystemMessage(content=(
-                    "You are an expert medical imaging assistant with training in radiology, "
-                    "pathology, and clinical medicine.\n\n"
-                    "Structure your analysis as follows when relevant:\n"
-                    "1. **Modality & Region** — imaging type (X-ray, MRI, CT, etc.) and view\n"
-                    "2. **Visible Anatomy** — normal structures and orientation\n"
-                    "3. **Key Findings** — abnormalities, lesions, fractures, effusions, masses. "
-                    "Explain medical terms in parentheses for non-experts.\n"
-                    "4. **Devices / Artifacts** — hardware, catheters, contrast, implants\n"
-                    "5. **Overall Impression** — plain-language summary of clinical significance\n\n"
-                    "⚠️ Always end with: *This AI analysis is for informational purposes only "
-                    "and is not a medical diagnosis. Please consult a qualified healthcare provider.*"
-                )),
-                HumanMessage(content=[
-                    {"type": "text", "text": image_question},
-                    {"type": "image_url", "image_url": {"url": data_url}}
-                ])
-            ]
-
-            response = await vision_model.ainvoke(messages)
-            analysis = response.content
-
-            updated_chat_history.append({
-                "role": "user",
-                "content": f"📎 Image: {image_question}"
-            })
-            updated_chat_history.append({
-                "role": "assistant",
-                "content": analysis
-            })
-
-        except Exception as e:
-            error_message = f"⚠️ Error analyzing image: {str(e)}"
-            print(error_message)
-            updated_chat_history.append({
-                "role": "user",
-                "content": f"📎 Image: {image_question}"
-            })
-            updated_chat_history.append({
-                "role": "assistant",
-                "content": error_message
-            })
-
-        return updated_chat_history, None
             
     # ===========================================
     # Bind events
@@ -2453,5 +2502,5 @@ if __name__ == "__main__":
         server_port=7860,
         ssr_mode=False,  # Disable SSR to avoid the experimental warning
         css=custom_css,
-        share=False
+        share=True
     )
