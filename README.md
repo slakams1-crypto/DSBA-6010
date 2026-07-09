@@ -1,1 +1,1 @@
-# Spring-2026-DSBA-6010-Group-17-TalkToMe
+# Spring-2026-DSBA-6010-Group-17-MedIntel Q&A Assistant
