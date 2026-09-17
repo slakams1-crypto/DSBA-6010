@@ -38,11 +38,9 @@ from langchain.tools import tool
 from langchain_community.tools import YouTubeSearchTool
 from ddgs import DDGS
 from langchain.agents import create_agent
-from langchain.agents.middleware import before_model, AgentState, AgentMiddleware, LLMToolSelectorMiddleware, ToolRetryMiddleware
 from langchain.agents.middleware import (
-    TodoListMiddleware,      # Task planning
-    SummarizationMiddleware, # Compress long convos
-    HumanInTheLoopMiddleware
+    before_model, AgentState, AgentMiddleware, LLMToolSelectorMiddleware, ToolRetryMiddleware,
+    TodoListMiddleware, SummarizationMiddleware, HumanInTheLoopMiddleware
 )
 from langgraph.runtime import Runtime
 from langchain_openai import ChatOpenAI
@@ -53,7 +51,10 @@ from calendar_agent import CalendarAgent
 import xml.etree.ElementTree as ET
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
-from safety.safety import check_moderation, check_moderation_flag, execute_chat_with_input_moderation, execute_all_moderations, check_image_moderation, get_chat_response_guardrails_async, get_chat_response_openai_async
+from safety.safety import (
+    check_moderation, check_moderation_flag, execute_chat_with_input_moderation, execute_all_moderations, 
+    check_image_moderation, get_chat_response_guardrails_async, get_chat_response_openai_async
+)
 from metrics import app as metrics_app
 from dotenv import load_dotenv
 load_dotenv()
@@ -62,15 +63,70 @@ import html
 ls_client = Client()
 
 # ============================================
+# Logging Configuration
+# ============================================
+# ── Writable path outside Git tree ──
+LOG_DIR = os.path.expanduser("~/logs")  # /home/user/logs
+os.makedirs(LOG_DIR, exist_ok=True)
+
+LOG_FILE = os.path.join(LOG_DIR, "app.log")
+
+# Create directory exactly once, with explicit check
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+    print(f"📁 Created logs directory: {LOG_DIR}")
+else:
+    print(f"📁 Logs directory exists: {LOG_DIR}")
+
+# ── Clear pre-existing handlers ──
+root = logging.getLogger()
+for handler in root.handlers[:]:
+    root.removeHandler(handler)
+
+# ── Configure logging ──
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, mode="a"),
+        logging.StreamHandler(sys.stdout)
+    ],
+    force=True
+)
+
+logger = logging.getLogger(__name__)
+
+# ── Verify ──
+logger.info("=" * 60)
+logger.info("Logging initialized")
+logger.info(f"Log file: {LOG_FILE}")
+logger.info(f"Log file size: {os.path.getsize(LOG_FILE) if os.path.exists(LOG_FILE) else 0} bytes")
+logger.info("=" * 60)
+
+# ============================================
 # LangSmith Tracing Set to False on StartUp
 # ============================================
 os.environ.setdefault("LANGSMITH_TRACING_V2", "false")
 
 # ============================================
+# Gradio - Create a custom theme with medical blue
+# ============================================
+medical_theme = gr.themes.Soft(
+    primary_hue="blue",  # This controls the primary button color
+    secondary_hue="gray",
+).set(
+    button_primary_background_fill="#0066cc",
+    button_primary_background_fill_dark="#004d99",
+    button_primary_text_color="white",
+    button_primary_border_color="#0066cc",
+    button_primary_border_color_dark="#004d99",
+)
+
+# ============================================
 # CSS for Gradio UI elements
 # ============================================
 custom_css = """
-body { font-size: 18px !important; }
+body { font-size: 16px !important; }
 .gr-box { font-size: 16px !important; }
 .file-btn-pair button { min-height: 44px !important; }
 .file-btn-pair .file-preview { min-height: 44px !important; display: flex; align-items: center; }
@@ -81,18 +137,131 @@ body { font-size: 18px !important; }
 .block.prompt-box textarea::placeholder,
 .block.prompt-box input::placeholder {
     color: #6b7280 !important; 
-    font-weight: 600 !important;
+    #font-weight: 600 !important;
     opacity: 1 !important;       /* browsers default to ~0.5 */
 }
 /* Also darken what the user types so it matches */
 .block.prompt-box textarea,
 .block.prompt-box input {
     color: #374151 !important; 
-    font-weight: 500 !important;
+    #font-weight: 500 !important;
 }
 /* Rate this response */
 .main-col {
     gap: 8px !important;
+}
+/* Panel cards */
+.panel-card-title {
+    background: var(--c-card-bg) !important;
+    border-radius: 12px !important;
+    box-shadow: var(--c-card-shadow) !important;
+    border: 1px solid var(--c-card-border) !important;
+    padding-top: 0px !important; /* Changed from 18px */
+    padding-right: 18px !important; /* Explicitly set if needed, but usually inherited */
+    padding-bottom: 18px !important; /* Explicitly set if needed, but usually inherited */
+    padding-left: 18px !important;  /* Explicitly set if needed, but usually inherited */
+}
+.panel-card {
+    background: var(--c-card-bg) !important;
+    border-radius: 12px !important;
+    box-shadow: var(--c-card-shadow) !important;
+    border: 1px solid var(--c-card-border) !important;
+    padding: 18px !important;
+}
+.panel-card > .form { gap: 12px !important; }
+/*Input panels (text & multimodal cards)*/
+#.input-panel {
+#    background: #ffffff !important;
+#    #border: 1px solid #6b7280 !important; /* dark grey — clearly visible */    
+#    #border: 2px solid transparent !important;      /* dark grey — clearly visible */
+#    border: 1px solid !important;      /* dark grey — clearly visible */
+#    #border-color: lightgrey
+#    border-color: rgba(220, 220, 220, 0.2);
+#    #border-color: rgba(240, 240, 240, 0.5);
+#    border-radius: 12px !important;
+#    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06) !important;
+#    #box-shadow: 4 4px 10px rgba(0, 0, 0, 0.2) !important;
+#    padding: 18px !important;
+#    margin-top: 10px !important;
+#    margin-bottom: 10px !important;
+#}
+/* Pill badge title */
+.panel-badge {
+    display: inline-block !important;
+    background: #eff6ff !important;
+    color: #2563eb !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.6px !important;
+    padding: 6px 6px !important;
+    border-radius: 999px !important;
+    margin-bottom: 4px !important;   /* ← was 16px */
+    margin-top: 1px !important;
+    line-height: 1 !important;
+}
+/* Card panels */
+.input-panel {
+    background: #ffffff !important;
+    border: 2px solid #e5e7eb !important;
+    border-radius: 16px !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05) !important;
+    padding: 16px !important;        /* ← was 24px */
+    margin-top: 10px !important;    /* default for text-input panel */
+    margin-bottom: 10px !important;
+}
+/* Multimodal cards only: slam top margin to 0 so they sit tight under the badge */
+.multimodal-card {
+    margin-top: 0 !important;
+}
+/* ── Equal height columns in multimodal row ── */
+.equal-height {
+    align-items: stretch !important;
+}
+.equal-height > .input-panel {
+    display: flex !important;
+    flex-direction: column !important;
+}
+/* ── Buttons ── */
+.btn-primary {
+    background: linear-gradient(135deg, #2563eb, #6d28d9) !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    font-size: 14px !important;
+    letter-spacing: .2px !important;
+    box-shadow: 0 2px 10px rgba(37,99,235,0.30) !important;
+    transition: all 0.18s ease !important;
+    color: #fff !important;
+    padding: 10px 0 !important;
+}
+.btn-primary:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 5px 18px rgba(37,99,235,0.40) !important;
+}
+.btn-secondary {
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+    font-size: 13px !important;
+    border: 1px solid var(--c-btn2-border) !important;
+    background: var(--c-btn2-bg) !important;
+    color: var(--c-btn2-text) !important;
+    transition: all 0.15s ease !important;
+}
+.btn-secondary:hover {
+    background: var(--c-chip-bg) !important;
+    border-color: var(--c-tab-sel) !important;
+}
+/*Tab styling*/
+.tab-nav button {
+    font-weight: 600 !important;
+    font-size: 14px !important;
+    border-radius: 8px 8px 0 0 !important;
+    color: var(--c-tab-text) !important;
+}
+.tab-nav button.selected {
+    color: var(--c-tab-sel) !important;
+    border-bottom: 2px solid var(--c-tab-sel) !important;
 }
 """
 
@@ -120,21 +289,7 @@ metrics = {
 if sys.platform == "linux":
     asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
-device = "cuda" if torch.cuda.is_available() else "cpu"    
-    
-# ============================================
-# Gradio - Create a custom theme with medical blue
-# ============================================
-medical_theme = gr.themes.Soft(
-    primary_hue="blue",  # This controls the primary button color
-    secondary_hue="gray",
-).set(
-    button_primary_background_fill="#0066cc",
-    button_primary_background_fill_dark="#004d99",
-    button_primary_text_color="white",
-    button_primary_border_color="#0066cc",
-    button_primary_border_color_dark="#004d99",
-)
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ============================================
 # Model configurations
@@ -162,8 +317,10 @@ hf_token = os.getenv('HUGGINGFACE_API_KEY')
 if hf_token:
     # Authenticate silently without prompting
     login(token=hf_token, add_to_git_credential=True)
+    logger.info("✓ Successfully authenticated with Hugging Face Hub")
     print("✓ Successfully authenticated with Hugging Face Hub")
 else:
+    logger.info("Warning: HF_TOKEN not found. Some features may be limited.")
     print("Warning: HF_TOKEN not found. Some features may be limited.")
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
@@ -269,6 +426,7 @@ inference_model = ChatOpenAI(
     api_key=OPENAI_API_KEY, 
     temperature=0    
 )
+logger.info("✓ Inference model loaded")
 print("✓ Inference model loaded")
 
 # ============================================
@@ -279,6 +437,7 @@ classifier_model = ChatOpenAI(
     api_key=OPENAI_API_KEY, 
     temperature=0
 )
+logger.info("✓ Classifier model loaded")
 print("✓ Classifier model loaded")
 
 # ============================================
@@ -290,6 +449,7 @@ vision_model = ChatOpenAI(
     temperature=0.3,
     max_tokens=1500,
 )
+logger.info("✓ Vision model loaded")
 print("✓ Vision model loaded")
 
 # ============================================
@@ -300,6 +460,7 @@ embedding_model = HuggingFaceEmbeddings(
     model_name=QAmodel["embed-model"],
     cache_folder="/tmp/.cache"  # Use tmp for Spaces
 )
+logger.info("✓ Embedding model loaded")
 print("✓ Embedding model loaded")
 
 # ============================================
@@ -311,8 +472,10 @@ print("✓ Embedding model loaded")
 #whisper_model = WhisperModel(QAmodel["whisper"], device="cpu", compute_type="int8")
 #print("✓ Whisper model loaded
 
+logger.info("🔄 Loading OpenAI Whisper model...")
 print("🔄 Loading OpenAI Whisper model...")
 whisper_model = whisper.load_model(QAmodel["whisper"])
+logger.info("✓ OpenAI Whisper model loaded")
 print("✓ OpenAI Whisper model loaded")
 
 # Global flags to track state across agent invocations
@@ -331,6 +494,7 @@ _dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 # ============================================
 # Load existing vector store
 # ============================================
+logger.info("🔄 Loading Chroma vector store...")
 print("🔄 Loading Chroma vector store...")
 persist_directory = './chroma_db_hf_rerun2'
 
@@ -348,6 +512,7 @@ vectordb = Chroma(
 )
 
 doc_count = vectordb._collection.count()
+logger.info(f"✓ Loaded vector store with {doc_count} documents using HuggingFace embeddings")
 print(f"✓ Loaded vector store with {doc_count} documents using HuggingFace embeddings")
 
 # ============================================
@@ -372,6 +537,7 @@ def get_gpu_utilization():
         if result.returncode == 0:
             return float(result.stdout.strip().split("\n")[0])
     except Exception:
+        logger.error(f"Error getting utilization: {e}")
         pass
 
     return 0.0
@@ -666,6 +832,7 @@ async def check_image_moderation_flag(image_path: str) -> Tuple[bool, str]:
         return is_flagged, base64_image, mime_type
         
     except Exception as e:
+        logger.error(f"⚠️ Moderation API error: {e}")
         print(f"⚠️ Moderation API error: {e}")
         # Fail-safe: if we can't verify, block the image
         return True, "", ""
@@ -990,6 +1157,7 @@ def track_tool_calls(func):
             tool_calls_this_request = 1
         except Exception as e:
             errors_this_request = 1
+            logger.error(f"Error executing {func.__name__}: {e}")
             result = f"Error executing {func.__name__}: {e}"
 
         # Append metrics consistently
@@ -1097,6 +1265,7 @@ def retrieve_context(query: str) -> str:
     
     except Exception as e:
         _kb_had_results = False
+        logger.error(f"Error in retrieve_context tool: {e}")
         print(f"Error in retrieve_context tool: {e}")
         return f"Error retrieving context from knowledge base: {e}"
 
@@ -1128,6 +1297,7 @@ def youtube_links_tool(query: str) -> str:
                 time.sleep(0.5)
                 
         except Exception as e:
+            logger.error(f"Error in retrieve_context tool: {e}")
             return (
                 f"Video search temporarily unavailable. "
                 f"Try searching: https://youtube.com/results?search_query={query.replace(' ', '+')}"
@@ -1179,6 +1349,7 @@ def medical_classifier(state: AgentState, runtime: Runtime) -> Dict[str, Any] | 
         is_medical = "YES" in class_result.content.upper()
         print(f"[Medical_Classifier] User Query: '{user_query}' -> Classifier Result: '{class_result.content}'")
     except Exception as e:
+        logger.error(f"Error in medical_classifier: {e}")
         print(f"Error in medical_classifier: {e}")
         is_medical = False
 
@@ -1525,6 +1696,7 @@ def generate_chat(user_input, chat_history):
                 updated.append({"role": "assistant", "content": full_response})
                 return clean_chat_history(updated)
             except Exception as e:
+                logger.error(f"BMI calculation error: {e}")
                 print(f"BMI calculation error: {e}")
                 # Fall through to normal flow on error
         else:
@@ -1557,6 +1729,7 @@ def generate_chat(user_input, chat_history):
         return clean_chat_history(updated)
         
     if is_medical:
+        logger.info(f"[Classification] Definition question detected, bypassing classifier: '{user_input}'")
         print(f"[Classification] Definition question detected, bypassing classifier: '{user_input}'")
     else:
         try:          
@@ -1568,6 +1741,7 @@ def generate_chat(user_input, chat_history):
             is_medical = "YES" in class_result.content.upper()
             print(f"[Medical Classifier] User Query: '{user_input}' -> Classifier Result: '{class_result.content}'")
         except Exception as e:
+            logger.error(f"Classification error: {e}")
             print(f"Classification error: {e}")
             is_medical = False
 
@@ -1614,6 +1788,7 @@ def generate_chat(user_input, chat_history):
         use_direct_kb = False
         if kb_answer and not is_advice:
             if is_definition and _is_poor_kb_answer(kb_answer):
+                logger.error(f"[KB] Poor definition answer: '{kb_answer}', falling through to LLM synthesis")
                 print(f"[KB] Poor definition answer: '{kb_answer}', falling through to LLM synthesis")
             else:
                 use_direct_kb = True
@@ -1621,6 +1796,7 @@ def generate_chat(user_input, chat_history):
         if use_direct_kb:
             # Factual/definition with good KB answer → return directly
             final_ai_message = kb_answer
+            logger.error(f"[KB Direct] Factual answer: '{final_ai_message[:200]}...'")
             print(f"[KB Direct] Factual answer: '{final_ai_message[:200]}...'")
         else:
             # Advice OR poor definition → agent synthesis with context pre-loaded
@@ -1664,6 +1840,7 @@ def generate_chat(user_input, chat_history):
 
     except Exception as e:
         error_msg = f"Error: {str(e)}"
+        logger.error(f"Error in generate_chat: {e}")
         print(f"Error in generate_chat: {e}")
         updated = []
         if chat_history:
@@ -1711,6 +1888,7 @@ def image_to_text_processor(image_path, processor, model, device, dtype, vtmodel
             return final_output
             
     except Exception as e:
+        logger.error(f"Error processing image: {str(e)}")
         return f"Error processing image: {str(e)}"
 
 # ===========================================
@@ -1718,6 +1896,7 @@ def image_to_text_processor(image_path, processor, model, device, dtype, vtmodel
 # ===========================================
 @traceable(run_type="chain", name="MedIntel Image Analysis")
 async def process_image_for_chat(image_file_path_str, image_question, chat_history):
+    logger.info(f"DEBUG: image={image_file_path_str}, question={image_question}")
     print(f"DEBUG: image={image_file_path_str}, question={image_question}")
 
     if chat_history is None:
@@ -1771,6 +1950,7 @@ async def process_image_for_chat(image_file_path_str, image_question, chat_histo
 
     except Exception as e:
         error_message = f"⚠️ Error analyzing image: {str(e)}"
+        logger.error(error_message)
         print(error_message)
         updated_chat_history.append({
             "role": "user",
@@ -1840,6 +2020,7 @@ def speech_to_text(audio_input, chat_history):
         return "", new_chat_history
 
     except Exception as e:
+        logger.error(f"Error during audio transcription: {e}")
         print(f"Error during audio transcription: {e}")
         # Return an error message to the user, appending it to chat_history
         error_message = f"Error transcribing audio: {e}"
@@ -1992,14 +2173,15 @@ calendar_agent = CalendarAgent(session_id="user_001", mock_mode=True)
 # Create the Gradio app - UI
 # ===========================================
 with gr.Blocks() as demo:
-    with gr.Tab("MedIntel Q&A Assistant"):
+    
+    with gr.Tab("🏥 MedIntel Q&A Assistant",elem_classes="panel-card-title"):
                 
         gr.Markdown(
             """
-            <h1 style='text-align: center; margin-bottom: 1em;'>
+            <h2 style='text-align: center;'>
                 🏥 MedIntel Q&A Assistant
-            </h1>
-            <p style='text-align: center; font-size: 1.1em; color: #555;'>
+            </h2>
+            <p style='text-align: center; color: #555;'>
                 Ask medical questions and get answers with knowledge base retrieval, LLM generation, and YouTube references.
             </p>
             """
@@ -2009,91 +2191,177 @@ with gr.Blocks() as demo:
         vtmodel_state = gr.State(value="blip")
         model_choice = QAmodel['gpt-mini']    
         vtmodel_id = QAmodel['blip']
-        run_id_state = gr.State(value=None)
+        run_id_state = gr.State(value=None)       
         
         with gr.Row():
             
-            with gr.Column(scale=3, elem_classes="main-col"):
-                chatbot = gr.Chatbot(
-                    label="Conversation History", 
-                    height=400,
-                    allow_tags=False
-                )
-
-                # Feedback UI
-                #with gr.Column(elem_classes="feedback-group"):    
-                with gr.Row(elem_classes="tight-feedback"):
-                    gr.Textbox(
-                        value="Rate this response:", 
-                        show_label=False, 
-                        container=False, 
-                        interactive=False,
-                        scale=0
+            with gr.Column(scale=3):
+                
+                with gr.Column(elem_classes="input-panel"):
+                    chatbot = gr.Chatbot(
+                        label="Conversation History",
+                        height=360,
+                        allow_tags=False,
                     )
-                    btn_up = gr.Button("👍", scale=0, min_width=50, variant="secondary")
-                    btn_down = gr.Button("👎", scale=0, min_width=50, variant="secondary")
+                
+                # Feedback UI - (widths bumped so nothing wraps)
+                with gr.Row():
+                    with gr.Column(scale=0, min_width=180):
+                        gr.Textbox(
+                            value="Rate this response:", 
+                            show_label=False, 
+                            container=False, 
+                            interactive=False
+                        )
+                    with gr.Column(scale=0, min_width=50):
+                        btn_up = gr.Button("👍", min_width=50, variant="secondary")
+                    with gr.Column(scale=0, min_width=50):
+                        btn_down = gr.Button("👎", min_width=50, variant="secondary")
+                    with gr.Column(scale=1):
+                        pass  # spacer
+                    with gr.Column(scale=0, min_width=170):
+                        clear_btn = gr.ClearButton(value="🗑️ Clear Chat")                      
+
+                # Text input panel (clean white card, NO grey header)
+                with gr.Column(elem_classes="input-panel"):
+                    fb_comment = gr.Textbox(
+                        placeholder="💬 Leave feedback",
+                        show_label=False,
+                        lines=1,
+                        #container=False,
+                        elem_classes=["prompt-box"]
+                    )
+                    fb_status = gr.Textbox(
+                        value="", 
+                        show_label=False, 
+                        interactive=False,
+                        container=False,
+                        visible=False
+                    )
+                    txt_input = gr.Textbox(
+                        show_label=False, 
+                        placeholder="Type your medical question here... (e.g., Can you clarify what cricopharynx is? OR What should I do if I have high blood sugar?)", 
+                        lines=2,
+                        elem_classes="prompt-box"
+                    )
+
+                with gr.Row():
+                    submit_btn = gr.Button("💬 Submit Question", variant="primary", scale=1)          
+                
+                # Multimodal panel (clean white card)
+                # with gr.Column(elem_classes="input-panel"):
+                with gr.Column():
+                    # gr.Markdown("**📎 Multimodal Input (Image & Audio)**")
+                    gr.HTML("<div class='panel-badge'>📎 Multimodal Input (Image & Audio)</div>")
                     
-                fb_comment = gr.Textbox(
-                    placeholder="Optional (type feedback here...): why was this helpful or not? (sent to LangSmith)",
-                    show_label=False,
-                    lines=1,
-                    container=False,
-                    elem_classes=["prompt-box", "tight-comment"]
-                )
-                
-                fb_status = gr.Textbox(
-                    value="", 
-                    show_label=False, 
-                    interactive=False,
-                    container=False,
-                    visible=False     # hides the empty bar until needed
-                )
-                
-                txt_input = gr.Textbox(
-                    show_label=False, 
-                    placeholder="Type your medical question here...", 
-                    lines=2,
-                    elem_classes="prompt-box"
-                )
-                
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        with gr.Row(elem_classes="file-btn-pair"):
-                            upload_file = gr.File(
-                                file_types=["image"], 
-                                label="Upload Medical Image",
-                                scale=0,
-                                min_width=220
+                    with gr.Row(elem_classes="equal-height"):
+                        with gr.Column(scale=2, elem_classes=["input-panel", "multimodal-card"]):
+                            with gr.Row(elem_classes="file-btn-pair"):
+                                
+                                upload_file = gr.File(
+                                    file_types=["image"], 
+                                    label="Upload Medical Image",
+                                    min_width=160,
+                                    scale=1
+                                )
+                                image_question = gr.Textbox(
+                                    placeholder="Ask about this image (e.g., 'Is this fracture healed?', 'Explain this chest X-ray')",
+                                    label="Ask a question about image",
+                                    value="Please provide a detailed medical analysis of this image.",
+                                    lines=2, 
+                                    scale=1,
+                                    elem_classes="prompt-box",
+                                    max_lines=5
+                                )
+                                image_to_text_btn = gr.Button(
+                                    "🔬 Analyze Image", 
+                                    variant="secondary", 
+                                    scale=0, 
+                                    min_width=200
+                                )
+                            preview = gr.Image(
+                                label="Preview", 
+                                visible=False, 
+                                height=180
                             )
-                            
-                            image_to_text_btn = gr.Button(
-                                "🔬 Analyze Image", 
-                                variant="secondary", 
-                                scale=0, 
-                                min_width=220
-                            )
-                            
-                        preview = gr.Image(
-                            label="Preview", 
-                            visible=False, 
-                            height=180
-                        )
-                        
-                        image_question = gr.Textbox(
-                            placeholder="Ask about this image (e.g., 'Is this fracture healed?', 'Explain this chest X-ray')",
-                            label="Ask a question about image",
-                            value="Please provide a detailed medical analysis of this image.",
-                            lines=2, elem_classes="prompt-box"
-                        )
-                        
-                    with gr.Column(scale=1, min_width=120):
-                        audio_input = gr.Audio(sources=['microphone'], type="filepath", label="🎤 Record")
-                        transcribe_button = gr.Button("🎤 Transcribe & Submit", variant="secondary")
-                
-                with gr.Row():
-                    submit_btn = gr.Button("💬 Submit Question", variant="primary", scale=1)
-                    clear_btn = gr.ClearButton(value="🗑️ Clear Chat", scale=0)
-                 
+
+                        # Right: audio (fixed width so it NEVER wraps below)
+                        with gr.Column(scale=1, min_width=120, elem_classes=["input-panel", "multimodal-card"]):                        
+                            audio_input = gr.Audio(sources=['microphone'], type="filepath", label="🎤 Record")
+                            transcribe_button = gr.Button("🎤 Transcribe & Submit", variant="secondary")
+
+    # ===========================================
+    # Function enables LLM to respond to user prompts/actions
+    # ===========================================
+    @traceable(run_type="chain", name="MedIntel Respond")
+    def respond(user_input, chat_history):
+        logger.info(f"DEBUG user_input type: {type(user_input)}, value: {repr(user_input)}")
+        print(f"DEBUG user_input type: {type(user_input)}, value: {repr(user_input)}")
+        
+        # CAPTURE LANGSMITH RUN ID
+        try:
+            run_tree = get_current_run_tree()
+            current_run_id = run_tree.id if run_tree else None
+        except Exception:
+            logger.info(f"Error in get_current_run_tree: {e}")
+            current_run_id = None
+        
+        try:
+            # 1. Clean Gradio multipart format
+            user_input = extract_gradio_text(user_input)
+            if not user_input:
+                return "", chat_history, current_run_id
+        
+            if chat_history is None:
+                chat_history = []
+        
+            # 2. Sanitize history before passing downstream
+            clean_history = []
+            for msg in chat_history:
+                if isinstance(msg, dict):
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        content = extract_gradio_text(content)
+                    clean_history.append({
+                        "role": msg.get("role", "user"),
+                        "content": str(content)
+                    })
+        
+            # 3. Run the deterministic pipeline
+            new_chat_history = generate_chat(user_input, clean_history)
+            return "", new_chat_history, current_run_id
+        
+        except Exception as e:
+            error_message = f"Error: {e}"
+            logger.error(f"Error in respond: {e}")
+            print(f"Error in respond: {e}")
+        
+            if chat_history is None:
+                chat_history = []
+        
+            clean_input = extract_gradio_text(user_input) if isinstance(user_input, (list, dict)) else str(user_input)
+            updated = _append_turn(chat_history, clean_input, error_message)
+            return "", updated, current_run_id
+            
+    # ===========================================
+    # Bind events
+    # ===========================================
+    transcribe_button.click(
+        speech_to_text,
+        inputs=[audio_input, chatbot],
+        outputs=[txt_input, chatbot]
+    )
+
+    submit_btn.click(respond, [txt_input, chatbot], [txt_input, chatbot, run_id_state])
+    txt_input.submit(respond, [txt_input, chatbot], [txt_input, chatbot, run_id_state])
+    clear_btn.click(lambda: [], None, chatbot, queue=False)
+    
+    image_to_text_btn.click(
+        process_image_for_chat,
+        inputs=[upload_file, image_question, chatbot],
+        outputs=[chatbot, upload_file]
+    )    
+    
     # ============================================
     # Metrics Dashboard Tab
     # ============================================
@@ -2236,6 +2504,7 @@ with gr.Blocks() as demo:
                 )
                 return gr.Textbox(value="✅ Feedback saved to LangSmith.", visible=True)
             except Exception as e:
+                logger.error(f"❌ LangSmith error: {str(e)}")
                 return gr.Textbox(value=f"❌ LangSmith error: {str(e)}", visible=True)           
         
         # ============================================
@@ -2298,7 +2567,7 @@ with gr.Blocks() as demo:
     # ============================================
     # PubMed Research Tab
     # ============================================
-    with gr.Tab("🔬 PubMed Research"):
+    with gr.Tab("🔬 PubMed Research",elem_classes="panel-card-title"):
         gr.Markdown(
             """
             <h2 style='text-align: center;'>PubMed Evidence Search</h2>
@@ -2360,7 +2629,7 @@ with gr.Blocks() as demo:
                 return summary, articles, summary, articles
             except Exception as e:
                 return f"Error: {str(e)}", [], "", []
-
+        
         pubmed_search_btn.click(
             run_pubmed_search,
             inputs=[pubmed_query, pubmed_max_results],
@@ -2413,77 +2682,85 @@ with gr.Blocks() as demo:
                 })
         out.append({"role": "user", "content": user_text})
         out.append({"role": "assistant", "content": assistant_text})
-        return out        
-
-    # ===========================================
-    # Function enables LLM to respond to user prompts/actions
-    # ===========================================
-    @traceable(run_type="chain", name="MedIntel Respond")
-    def respond(user_input, chat_history):
-        print(f"DEBUG user_input type: {type(user_input)}, value: {repr(user_input)}")
-        
-        # CAPTURE LANGSMITH RUN ID
-        try:
-            run_tree = get_current_run_tree()
-            current_run_id = run_tree.id if run_tree else None
-        except Exception:
-            current_run_id = None
-        
-        try:
-            # 1. Clean Gradio multipart format
-            user_input = extract_gradio_text(user_input)
-            if not user_input:
-                return "", chat_history, current_run_id
-        
-            if chat_history is None:
-                chat_history = []
-        
-            # 2. Sanitize history before passing downstream
-            clean_history = []
-            for msg in chat_history:
-                if isinstance(msg, dict):
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        content = extract_gradio_text(content)
-                    clean_history.append({
-                        "role": msg.get("role", "user"),
-                        "content": str(content)
-                    })
-        
-            # 3. Run the deterministic pipeline
-            new_chat_history = generate_chat(user_input, clean_history)
-            return "", new_chat_history, current_run_id
-        
-        except Exception as e:
-            error_message = f"Error: {e}"
-            print(f"Error in respond: {e}")
-        
-            if chat_history is None:
-                chat_history = []
-        
-            clean_input = extract_gradio_text(user_input) if isinstance(user_input, (list, dict)) else str(user_input)
-            updated = _append_turn(chat_history, clean_input, error_message)
-            return "", updated, current_run_id
-            
-    # ===========================================
-    # Bind events
-    # ===========================================
-    transcribe_button.click(
-        speech_to_text,
-        inputs=[audio_input, chatbot],
-        outputs=[txt_input, chatbot]
-    )
-
-    submit_btn.click(respond, [txt_input, chatbot], [txt_input, chatbot, run_id_state])
-    txt_input.submit(respond, [txt_input, chatbot], [txt_input, chatbot, run_id_state])
-    clear_btn.click(lambda: [], None, chatbot, queue=False)
+        return out
     
-    image_to_text_btn.click(
-        process_image_for_chat,
-        inputs=[upload_file, image_question, chatbot],
-        outputs=[chatbot, upload_file]
-    )
+    # ============================================
+    # MedlinePlus Research Tab
+    # ============================================
+    with gr.Tab("🔬 MedLinePlus Research",elem_classes="panel-card", visible=False):
+        gr.Markdown(
+            """
+            <h2 style='text-align: center;'>MedLinePlus Search</h2>
+            <p style='text-align: center; color: #555;'>
+                Search peer-reviewed medical literature and get an AI-synthesized summary with downloadable reports.
+            </p>
+            """
+        )
+        
+        with gr.Row():
+            with gr.Column(scale=3):
+                medline_query = gr.Textbox(
+                    label="Search Query",
+                    placeholder="e.g., 'GLP-1 agonists cardiovascular outcomes 2024' or 'pneumonia treatment guidelines'",
+                    lines=2
+                )        
 
+        # Row 1: primary action
+        with gr.Row():
+            medline_search_btn = gr.Button("🔍 Search MedLinePlus", variant="primary")
+
+        #medline_search_btn.click(
+        #    run_medline_search,
+        #    inputs=[medline_query, medline_max_search_results],
+        #    outputs=[medline_summary_md, medline_raw_json, state_summary, state_articles]
+        #)      
+
+        # Search handler
+        #def run_medline_search(query, max_results):
+        #    if not query or not query.strip():
+        #        return "Please enter a search query.", [], "", []
+        #    try:
+        #        summary, articles = summarize_pubmed_query(query.strip(), int(max_results))
+        #        return summary, articles, summary, articles
+        #    except Exception as e:
+        #        return f"Error: {str(e)}", [], "", []      
+        
+def summarize_medline_query(query: str, max_results: int = 5) -> tuple[str, List[Dict]]:
+    """
+    Search MedLine and return (markdown_summary, raw_document_list).
+    Uses existing GPT-4o-mini / gpt-4o model for synthesis.
+    """
+    
+    documents = _fetch_medline_documents(pmids)
+    if not documents:
+        return "Found article IDs but could not retrieve abstracts.", []
+
+    # Build prompt for LLM synthesis
+    paper_blocks = []
+    for i, doc in enumerate(documents, 1):
+        author_line = ", ".join(art["authors"][:3]) + (" et al." if len(doc["authors"]) > 3 else "")
+        paper_blocks.append(
+            f"[{i}] {doc['title']}\n"
+            f"    Authors: {author_line} | Year: {doc['year']}\n"
+            f"    Abstract: {doc['abstract']}"
+        )
+    
+    context = "\n\n".join(paper_blocks)
+    
+    search_prompt = SYNTHESIS_PROMPT.replace("{user_query}", query)
+    search_prompt = search_prompt.replace("{context}", context)    
+    
+    # Use the lightweight model for cost efficiency; swap to "gpt-4o" if you want deeper analysis
+    medline_search_model = ChatOpenAI(
+        model=QAmodel['gpt-mini'],
+        api_key=OPENAI_API_KEY,
+        temperature=0.2,
+        max_tokens=1500,
+    )
+    
+    response = medline_search_model.invoke([{"role": "user", "content": search_prompt}])
+    return response.content, article                
+        
 # ===========================================
 # Function that helps shutting down gracefully in case if there are any system issues
 # ===========================================
@@ -2491,6 +2768,9 @@ def signal_handler(sig, frame):
     print('Shutting down gracefully...')
     demo.close()  # Close gradio properly
     sys.exit(0)
+
+def greet():
+    return "I am Medical Q&A Assistant. How can I help you today?"
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
